@@ -1,0 +1,100 @@
+"""TrayController: pure presentation, no coordinator/backend involved."""
+
+from __future__ import annotations
+
+from PySide6.QtWidgets import QApplication
+
+from local_meeting_recorder.domain.recording_state import RecordingState
+from local_meeting_recorder.domain.session_metadata import SessionMetadata
+from local_meeting_recorder.ui.tray import TrayController
+
+
+def test_start_enabled_only_when_idle_saved_or_error(qapp: QApplication) -> None:
+    tray = TrayController()
+    for state in (RecordingState.IDLE, RecordingState.SAVED, RecordingState.ERROR):
+        tray.set_state(state)
+        assert tray._start_action.isEnabled(), state
+    for state in (RecordingState.PREPARING, RecordingState.RECORDING, RecordingState.FINALIZING):
+        tray.set_state(state)
+        assert not tray._start_action.isEnabled(), state
+
+
+def test_stop_enabled_only_while_preparing_or_recording(qapp: QApplication) -> None:
+    tray = TrayController()
+    for state in (RecordingState.PREPARING, RecordingState.RECORDING):
+        tray.set_state(state)
+        assert tray._stop_action.isEnabled(), state
+    for state in (
+        RecordingState.IDLE,
+        RecordingState.FINALIZING,
+        RecordingState.SAVED,
+        RecordingState.ERROR,
+    ):
+        tray.set_state(state)
+        assert not tray._stop_action.isEnabled(), state
+
+
+def test_status_text_includes_error_detail(qapp: QApplication) -> None:
+    tray = TrayController()
+    tray.set_state(RecordingState.ERROR, detail="helper crashed")
+    assert tray._status_action.text() == "Error: helper crashed"
+
+
+def test_status_text_has_no_detail_by_default(qapp: QApplication) -> None:
+    tray = TrayController()
+    tray.set_state(RecordingState.IDLE)
+    assert tray._status_action.text() == "Idle"
+
+
+def test_duration_only_updates_text_while_recording(qapp: QApplication) -> None:
+    tray = TrayController()
+    tray.set_state(RecordingState.RECORDING)
+    tray.set_duration(75)
+    assert tray._status_action.text() == "Recording — 1:15"
+
+    tray.set_state(RecordingState.SAVED)
+    before = tray._status_action.text()
+    tray.set_duration(999)  # stale timer tick arriving after the state already moved on
+    assert tray._status_action.text() == before
+
+
+def test_recent_sessions_populate_submenu(qapp: QApplication) -> None:
+    tray = TrayController()
+    sessions = [
+        SessionMetadata(session_id="lmr_20261104T000000_aaaa", title="Standup"),
+        SessionMetadata(session_id="lmr_20261104T000001_bbbb"),
+    ]
+    tray.set_recent_sessions(sessions)
+    assert tray._recent_menu.isEnabled()
+    labels = [action.text() for action in tray._recent_menu.actions()]
+    assert labels == ["Standup", "lmr_20261104T000001_bbbb"]
+
+
+def test_recent_sessions_disabled_submenu_when_empty(qapp: QApplication) -> None:
+    tray = TrayController()
+    tray.set_recent_sessions([])
+    assert not tray._recent_menu.isEnabled()
+
+
+def test_clicking_recent_session_emits_its_id(qapp: QApplication) -> None:
+    tray = TrayController()
+    tray.set_recent_sessions([SessionMetadata(session_id="lmr_20261104T000002_cccc")])
+    emitted: list[str] = []
+    tray.recent_session_requested.connect(emitted.append)
+    tray._recent_menu.actions()[0].trigger()
+    assert emitted == ["lmr_20261104T000002_cccc"]
+
+
+def test_start_and_stop_actions_emit_signals(qapp: QApplication) -> None:
+    tray = TrayController()
+    starts = []
+    stops = []
+    tray.start_requested.connect(lambda: starts.append(1))
+    tray.stop_requested.connect(lambda: stops.append(1))
+
+    tray._start_action.trigger()  # enabled while Idle
+    assert starts == [1]
+
+    tray.set_state(RecordingState.RECORDING)  # Stop is only enabled while active
+    tray._stop_action.trigger()
+    assert stops == [1]

@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environment
+.env
+*.local.toml
+
+# Native build output
+native/macos/build/
+*.o
+*.dSYM/
+
+# Packaging artifacts
+packaging/macos/build/
+packaging/macos/dist/
+*.dmg
+*.app
+
+# Recordings, models, caches (runtime data lives in Application Support, never here)
+recordings/
+models/
+*.mov
+*.mp4
+*.wav
+*.sqlite
+*.log
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store

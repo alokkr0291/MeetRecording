@@ -1,0 +1,82 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "local-meeting-recorder"
+version = "0.1.0"
+description = "Local-first macOS meeting recorder: screen, system audio, microphone, transcription, summaries"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+authors = [{ name = "LocalMeetingRecorder" }]
+dependencies = [
+    "PySide6>=6.8,<7",
+    "pydantic>=2.7,<3",
+    "pydantic-settings>=2.3,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2",
+    "pytest-timeout>=2.3",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+transcription = ["faster-whisper>=1.1"]
+packaging = ["pyinstaller>=6.10"]
+
+[project.scripts]
+local-meeting-recorder = "local_meeting_recorder.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+local_meeting_recorder = ["py.typed"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+extend-exclude = ["native", "packaging", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "ANN", "N", "PL", "PTH", "T20"]
+ignore = [
+    "ANN401",   # Any in **kwargs is acceptable at boundaries
+    "PLR0913",  # many-argument constructors are explicit by design here
+    "PLR2004",  # magic values in small helpers are readable enough
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ANN", "PLR", "T20"]
+"src/local_meeting_recorder/main.py" = ["T20"]
+"scripts/*.py" = ["T20"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "src"
+packages = ["local_meeting_recorder"]
+strict = true
+warn_unreachable = true
+show_error_codes = true
+pretty = true
+
+[[tool.mypy.overrides]]
+module = ["PySide6.*", "shiboken6.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+timeout = 120
+addopts = "-ra --strict-markers"
+markers = [
+    "hardware: requires real capture hardware and macOS permissions (LMR_HW_TESTS=1)",
+    "packaging: requires a built application bundle (LMR_PACKAGING_TESTS=1)",
+    "ffmpeg: requires ffmpeg/ffprobe on PATH",
+]
+filterwarnings = ["error::DeprecationWarning:local_meeting_recorder.*"]
