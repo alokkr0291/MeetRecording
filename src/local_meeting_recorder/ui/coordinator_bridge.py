@@ -41,6 +41,9 @@ class CoordinatorBridge(QObject):
     operation_succeeded = Signal(object)  # SessionMetadata | None
     operation_failed = Signal(str, str)  # code, message
     permissions_checked = Signal(object, object)  # PermissionStatus | None, Exception | None
+    permissions_requested = Signal(
+        object, object
+    )  # PermissionsRequestResult | None, Exception | None
 
     def __init__(self) -> None:
         super().__init__()
@@ -92,6 +95,17 @@ class CoordinatorBridge(QObject):
                 self.permissions_checked.emit(status, None)
 
         threading.Thread(target=run, name="lmr-check-permissions", daemon=True).start()
+
+    def request_permissions_async(self, *, timeout: float | None = None) -> None:
+        def run() -> None:
+            try:
+                result = self.coordinator.request_permissions(timeout=timeout)
+            except Exception as exc:
+                self.permissions_requested.emit(None, exc)
+            else:
+                self.permissions_requested.emit(result, None)
+
+        threading.Thread(target=run, name="lmr-request-permissions", daemon=True).start()
 
     def _run_async(self, call: Callable[[], SessionMetadata | None]) -> None:
         def run() -> None:

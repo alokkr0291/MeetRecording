@@ -7,12 +7,16 @@ from pathlib import Path
 
 import pytest
 
+import local_meeting_recorder.storage.paths as paths_module
 from local_meeting_recorder.domain import SessionMetadata, SessionStatus
+from local_meeting_recorder.domain.errors import StorageDirectoryError
 from local_meeting_recorder.storage.paths import (
     HELPER_BINARY_NAME,
     StoragePaths,
     default_data_dir,
+    resolve_external_binary,
     resolve_helper_binary,
+    validate_writable_directory,
 )
 from local_meeting_recorder.storage.session_store import SessionStore
 
@@ -52,6 +56,40 @@ def test_resolve_helper_prefers_explicit_then_env(
     assert resolve_helper_binary(not_exec) == env_bin  # non-executable candidates are skipped
 
 
+# -- resolve_external_binary (Phase 6C: a double-clicked .app's minimal PATH) -----------
+
+
+def test_resolve_external_binary_leaves_an_explicit_path_untouched(tmp_path: Path) -> None:
+    custom = tmp_path / "custom-ffmpeg"
+    assert resolve_external_binary(str(custom)) == str(custom)
+
+
+def test_resolve_external_binary_prefers_the_current_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(paths_module.shutil, "which", lambda name: f"/on/path/{name}")
+    assert resolve_external_binary("ffmpeg") == "/on/path/ffmpeg"
+
+
+def test_resolve_external_binary_falls_back_to_common_install_dirs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(paths_module.shutil, "which", lambda name: None)  # not on the minimal PATH
+    fake_homebrew = tmp_path / "opt_homebrew_bin"
+    fake_homebrew.mkdir()
+    fake_ffmpeg = fake_homebrew / "ffmpeg"
+    fake_ffmpeg.write_text("#!/bin/sh\n")
+    fake_ffmpeg.chmod(fake_ffmpeg.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setattr(paths_module, "_COMMON_EXTERNAL_BINARY_DIRS", (fake_homebrew,))
+    assert resolve_external_binary("ffmpeg") == str(fake_ffmpeg)
+
+
+def test_resolve_external_binary_returns_the_bare_name_when_nowhere_is_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(paths_module.shutil, "which", lambda name: None)
+    monkeypatch.setattr(paths_module, "_COMMON_EXTERNAL_BINARY_DIRS", ())
+    assert resolve_external_binary("ffmpeg") == "ffmpeg"
+
+
 def test_session_store_create_write_read_list(paths: StoragePaths) -> None:
     store = SessionStore(paths)
     older = SessionMetadata(session_id="lmr_20260101T000000_aaaa")
@@ -88,3 +126,109 @@ def test_session_store_write_is_atomic_and_skips_corrupt(paths: StoragePaths) ->
     raw = json.loads(store.session_file(meta.session_id).read_text(encoding="utf-8"))
     assert raw["status"] == "in_progress"
     assert store.session_file(meta.session_id).stat().st_size > 0
+
+
+def test_validate_writable_directory_creates_missing_dir(tmp_path: Path) -> None:
+    target = tmp_path / "new" / "nested"
+    validate_writable_directory(target)
+    assert target.is_dir()
+
+
+def test_validate_writable_directory_rejects_a_file(tmp_path: Path) -> None:
+    target = tmp_path / "a_file"
+    target.write_text("x")
+    with pytest.raises(StorageDirectoryError):
+        validate_writable_directory(target)
+
+
+def test_validate_writable_directory_rejects_unwritable_dir(tmp_path: Path) -> None:
+    target = tmp_path / "readonly"
+    target.mkdir()
+    target.chmod(0o500)
+    try:
+        with pytest.raises(StorageDirectoryError):
+            validate_writable_directory(target)
+    finally:
+        target.chmod(0o700)  # so tmp_path cleanup can remove it
+
+
+def test_set_recordings_dir_override_changes_recordings_dir(tmp_path: Path) -> None:
+    paths = StoragePaths(root=tmp_path / "data")
+    new_dir = tmp_path / "custom-recordings"
+    paths.set_recordings_dir_override(new_dir)
+    assert paths.recordings_dir == new_dir
+
+
+def test_set_recordings_dir_override_keeps_previous_location_in_history(tmp_path: Path) -> None:
+    paths = StoragePaths(root=tmp_path / "data")
+    default_dir = paths.recordings_dir
+    new_dir = tmp_path / "custom-recordings"
+    paths.set_recordings_dir_override(new_dir)
+    assert default_dir in paths.additional_recordings_dirs
+    assert paths.session_dir_roots() == [new_dir, default_dir]
+
+
+def test_set_recordings_dir_override_rejects_unwritable_directory(tmp_path: Path) -> None:
+    paths = StoragePaths(root=tmp_path / "data")
+    blocked = tmp_path / "blocked"
+    blocked.write_text("not a directory")
+    with pytest.raises(StorageDirectoryError):
+        paths.set_recordings_dir_override(blocked)
+    assert paths.recordings_dir_override is None  # rejected change never applied
+
+
+def test_set_recordings_dir_override_to_none_restores_default_and_keeps_history(
+    tmp_path: Path,
+) -> None:
+    paths = StoragePaths(root=tmp_path / "data")
+    default_dir = paths.recordings_dir
+    custom_dir = tmp_path / "custom-recordings"
+    paths.set_recordings_dir_override(custom_dir)
+    paths.set_recordings_dir_override(None)
+    assert paths.recordings_dir == default_dir
+    assert custom_dir in paths.additional_recordings_dirs
+
+
+def test_sessions_from_a_previous_recordings_dir_remain_listed_after_a_change(
+    tmp_path: Path,
+) -> None:
+    paths = StoragePaths(root=tmp_path / "data")
+    paths.ensure()
+    store = SessionStore(paths)
+    old_session = SessionMetadata(session_id="lmr_20260101T000000_aaaa")
+    store.create(old_session)
+
+    new_dir = tmp_path / "custom-recordings"
+    paths.set_recordings_dir_override(new_dir)
+    paths.ensure()
+    new_session = SessionMetadata(session_id="lmr_20260102T000000_bbbb")
+    store.create(new_session)
+
+    listed_ids = {m.session_id for m in store.list_sessions()}
+    assert listed_ids == {old_session.session_id, new_session.session_id}
+
+
+def test_session_dir_resolves_existing_session_under_a_historical_root(tmp_path: Path) -> None:
+    paths = StoragePaths(root=tmp_path / "data")
+    paths.ensure()
+    store = SessionStore(paths)
+    old_session = SessionMetadata(session_id="lmr_20260101T000000_cccc")
+    old_dir = store.create(old_session)
+
+    new_dir = tmp_path / "custom-recordings"
+    paths.set_recordings_dir_override(new_dir)
+
+    # the session still resolves to where it actually lives, not the new default root
+    assert store.session_dir(old_session.session_id) == old_dir
+    assert store.read(old_session.session_id).session_id == old_session.session_id
+    assert store.recording_path(old_session) == old_dir / "recording.mov"
+
+
+def test_session_dir_for_a_brand_new_session_uses_the_current_default(tmp_path: Path) -> None:
+    paths = StoragePaths(root=tmp_path / "data")
+    paths.ensure()
+    store = SessionStore(paths)
+    new_dir = tmp_path / "custom-recordings"
+    paths.set_recordings_dir_override(new_dir)
+
+    assert store.session_dir("lmr_brand_new_session") == new_dir / "lmr_brand_new_session"

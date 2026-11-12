@@ -35,11 +35,55 @@ class AudioTrackInfo(BaseModel):
     channels: int | None = None
 
 
+class TranscriptionStatus(StrEnum):
+    NOT_STARTED = "not_started"
+    RUNNING = "running"
+    DONE = "done"
+    FAILED = "failed"
+    PARTIAL = "partial"
+    """Phase 5 source-separated transcription: some audio sources (e.g. system) were
+    transcribed successfully but at least one other (e.g. microphone) failed. The
+    transcript file still exists with whichever segments succeeded; see
+    ``Transcript.source_errors`` for which source(s) failed and why."""
+
+
+class DiarizationStatus(StrEnum):
+    NOT_STARTED = "not_started"
+    RUNNING = "running"
+    DONE = "done"
+    FAILED = "failed"
+    DISABLED = "disabled"
+    """The user has diarization turned off in Settings — distinct from ``FAILED`` so the
+    UI can say "turned off" instead of "something went wrong."""
+
+
+class SummaryStatus(StrEnum):
+    NOT_STARTED = "not_started"
+    RUNNING = "running"
+    DONE = "done"
+    FAILED = "failed"
+
+
 class PostProcessingArtifacts(BaseModel):
     mixdown_file: str | None = None
     audio_16k_file: str | None = None
     transcript_file: str | None = None
+    transcript_status: TranscriptionStatus = TranscriptionStatus.NOT_STARTED
+    transcript_language: str | None = None
+    transcript_model: str | None = None
+    transcript_error: str | None = None
+    diarization_status: DiarizationStatus = DiarizationStatus.NOT_STARTED
+    diarization_model: str | None = None
+    diarization_error: str | None = None
+    diarization_has_unknown_speaker: bool = False
+    """``True`` when at least one system-audio segment could not be confidently
+    attributed to a clustered speaker (``UNKNOWN_SPEAKER_ID``) — lets the UI say
+    "speakers partially identified" instead of implying every voice was resolved."""
     summary_file: str | None = None
+    summary_status: SummaryStatus = SummaryStatus.NOT_STARTED
+    summary_provider: str | None = None
+    summary_model: str | None = None
+    summary_error: str | None = None
 
 
 def utc_now() -> datetime:
@@ -109,3 +153,62 @@ class SessionMetadata(BaseModel):
     def mark_cancelled(self) -> None:
         self.status = SessionStatus.CANCELLED
         self.finalized_at = utc_now()
+
+    def mark_transcription_running(self) -> None:
+        self.post_processing.transcript_status = TranscriptionStatus.RUNNING
+        self.post_processing.transcript_error = None
+
+    def mark_transcription_done(self, *, transcript_file: str, language: str, model: str) -> None:
+        self.post_processing.transcript_status = TranscriptionStatus.DONE
+        self.post_processing.transcript_file = transcript_file
+        self.post_processing.transcript_language = language
+        self.post_processing.transcript_model = model
+        self.post_processing.transcript_error = None
+
+    def mark_transcription_failed(self, *, message: str) -> None:
+        self.post_processing.transcript_status = TranscriptionStatus.FAILED
+        self.post_processing.transcript_error = message
+
+    def mark_transcription_partial(
+        self, *, transcript_file: str, language: str, model: str, message: str
+    ) -> None:
+        """Some audio source(s) transcribed successfully, at least one did not."""
+        self.post_processing.transcript_status = TranscriptionStatus.PARTIAL
+        self.post_processing.transcript_file = transcript_file
+        self.post_processing.transcript_language = language
+        self.post_processing.transcript_model = model
+        self.post_processing.transcript_error = message
+
+    def mark_diarization_running(self) -> None:
+        self.post_processing.diarization_status = DiarizationStatus.RUNNING
+        self.post_processing.diarization_error = None
+        self.post_processing.diarization_has_unknown_speaker = False
+
+    def mark_diarization_done(self, *, model: str, has_unknown_speaker: bool = False) -> None:
+        self.post_processing.diarization_status = DiarizationStatus.DONE
+        self.post_processing.diarization_model = model
+        self.post_processing.diarization_error = None
+        self.post_processing.diarization_has_unknown_speaker = has_unknown_speaker
+
+    def mark_diarization_failed(self, *, message: str) -> None:
+        self.post_processing.diarization_status = DiarizationStatus.FAILED
+        self.post_processing.diarization_error = message
+
+    def mark_diarization_disabled(self) -> None:
+        self.post_processing.diarization_status = DiarizationStatus.DISABLED
+        self.post_processing.diarization_error = None
+
+    def mark_summary_running(self) -> None:
+        self.post_processing.summary_status = SummaryStatus.RUNNING
+        self.post_processing.summary_error = None
+
+    def mark_summary_done(self, *, provider: str, model: str) -> None:
+        self.post_processing.summary_status = SummaryStatus.DONE
+        self.post_processing.summary_file = "summary.json"
+        self.post_processing.summary_provider = provider
+        self.post_processing.summary_model = model
+        self.post_processing.summary_error = None
+
+    def mark_summary_failed(self, *, message: str) -> None:
+        self.post_processing.summary_status = SummaryStatus.FAILED
+        self.post_processing.summary_error = message

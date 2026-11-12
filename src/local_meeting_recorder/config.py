@@ -60,10 +60,14 @@ class Settings(BaseSettings):
     ffprobe_path: str = "ffprobe"
     create_mixdown: bool = True
 
-    # Phase 4/5 placeholders: wired later, present so the config shape is stable --------
-    whisper_model: str = "small"
-    ollama_base_url: str = "http://127.0.0.1:11434"
-    ollama_model: str | None = None
+    # Transcription (Phase 4) -----------------------------------------------------------
+    # CPU-first by design (Phase 6): device/compute_type are never auto-detected — this
+    # app has no GPU-detection code anywhere. "base" is the recommended default model
+    # size for an ordinary computer; "tiny" is available for lower-end hardware and
+    # "medium"/"large-v3" are advanced, slower options — see settings/profiles.py.
+    whisper_model: str = "base"
+    whisper_device: str = "cpu"
+    whisper_compute_type: str = "int8"
 
     @field_validator("data_dir", "helper_path", mode="before")
     @classmethod

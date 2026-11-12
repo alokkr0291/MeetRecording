@@ -27,6 +27,15 @@ class SessionStore:
         return self._paths
 
     def session_dir(self, session_id: str) -> Path:
+        """Where this session's files live. Checks every directory that has ever been
+        the recordings location (oldest recordings may be under a since-changed
+        setting) and returns whichever one actually has it; a session that does not
+        exist anywhere yet (i.e. is about to be created) resolves to the current
+        default location."""
+        for root in self._paths.session_dir_roots():
+            candidate = root / session_id
+            if (candidate / SESSION_FILE_NAME).is_file():
+                return candidate
         return self._paths.session_dir(session_id)
 
     def session_file(self, session_id: str) -> Path:
@@ -62,24 +71,27 @@ class SessionStore:
         return self.session_file(session_id).is_file()
 
     def list_sessions(self) -> list[SessionMetadata]:
-        """All readable sessions, newest first. Corrupt files are logged and skipped."""
-        recordings = self._paths.recordings_dir
-        if not recordings.is_dir():
-            return []
+        """All readable sessions, newest first, across every directory that has ever
+        been the recordings location (``StoragePaths.session_dir_roots()``) — changing
+        the recordings directory in Settings never hides sessions saved under a
+        previous one. Corrupt files are logged and skipped."""
         sessions: list[SessionMetadata] = []
-        for entry in recordings.iterdir():
-            if not entry.is_dir():
+        for recordings in self._paths.session_dir_roots():
+            if not recordings.is_dir():
                 continue
-            session_file = entry / SESSION_FILE_NAME
-            if not session_file.is_file():
-                continue
-            try:
-                sessions.append(self._read_file(session_file))
-            except (OSError, ValueError, ValidationError) as exc:
-                log.warning(
-                    "skipping unreadable session file",
-                    extra={"path": str(session_file), "error": repr(exc)},
-                )
+            for entry in recordings.iterdir():
+                if not entry.is_dir():
+                    continue
+                session_file = entry / SESSION_FILE_NAME
+                if not session_file.is_file():
+                    continue
+                try:
+                    sessions.append(self._read_file(session_file))
+                except (OSError, ValueError, ValidationError) as exc:
+                    log.warning(
+                        "skipping unreadable session file",
+                        extra={"path": str(session_file), "error": repr(exc)},
+                    )
         sessions.sort(key=lambda m: m.created_at, reverse=True)
         return sessions
 

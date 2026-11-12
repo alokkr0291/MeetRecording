@@ -30,6 +30,7 @@ bash scripts/build_dev_app.sh    # builds packaging/macos/dev/LocalMeetingRecord
                                   # so Screen Recording/Microphone prompts are attributable;
                                   # `open packaging/macos/dev/LocalMeetingRecorder.app` to run it)
 LMR_HW_TESTS=1 pytest tests/capture -s -q   # real capture test (needs permissions)
+LMR_WHISPER_TESTS=1 pytest tests/transcription -s -q   # real faster-whisper model (downloads on first run)
 ```
 
 PyCharm: interpreter = `.venv/bin/python`; run configuration = module `local_meeting_recorder.main` with working directory = project root; mark `src` as Sources Root.
@@ -50,13 +51,19 @@ src/local_meeting_recorder/
   domain/          pure types: RecordingState, transitions, SessionId, SessionMetadata
   application/     RecordingCoordinator, SessionManager, recovery
   capture/         protocols.py, fake.py, macos/, windows/
-  media/           inspector (ffprobe), analysis (PCM RMS/DFT), postprocess (ffmpeg)
-  storage/         paths, session_store
-  infrastructure/  logging_setup, subprocess_manager, diagnostics
-  ui/              tray, consent dialog, permission guide, settings, icons
-  transcription/   (Phase 4) protocol + faster-whisper backend
-  summarization/   (Phase 5) protocol + Ollama client
-  security/        prompt hardening helpers (Phase 5)
+  media/           inspector (ffprobe), analysis (PCM RMS/DFT), postprocess (ffmpeg),
+                   audio_extractor (Phase 4)
+  storage/         paths (configurable recordings dir, Phase 4.5), session_store
+  infrastructure/  logging_setup, subprocess_manager, diagnostics,
+                   credentials/ (Phase 4.5: CredentialStore, MacOSKeychainStore)
+  settings/        (Phase 4.5) AppSettings, SettingsService (settings.json)
+  ui/              tray, consent dialog, permission guide, icons,
+                   transcript_dialog, transcription_bridge, settings_dialog (Phase 4.5)
+  transcription/   (Phase 4) engine (faster-whisper), models, store, manager;
+                   providers/ (Phase 4.5: OpenAI, OpenRouter clients + factory)
+  speaker/         (Phase 5C) diarization: protocol, pyannote engine, assignment, factory
+  summarization/   (Phase 5E/5F) manager, models, schema (incl. prompt-injection
+                   delimiting), markdown export; providers/ (Ollama, OpenAI, OpenRouter)
 native/macos/      Swift helper source, Info.plist, build output in build/
 tests/             unit/, integration/, capture/ (hardware-gated), packaging/
 ```

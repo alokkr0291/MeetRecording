@@ -7,13 +7,19 @@ actions mean.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
+from local_meeting_recorder import APP_DISPLAY_NAME
 from local_meeting_recorder.domain.recording_state import RecordingState
-from local_meeting_recorder.domain.session_metadata import SessionMetadata
+from local_meeting_recorder.domain.session_metadata import (
+    DiarizationStatus,
+    SessionMetadata,
+    SummaryStatus,
+    TranscriptionStatus,
+)
 from local_meeting_recorder.ui.icons import icon_for_state
 
 _START_ENABLED_STATES = frozenset({RecordingState.IDLE, RecordingState.SAVED, RecordingState.ERROR})
@@ -34,6 +40,8 @@ class TrayController(QObject):
     stop_requested = Signal()
     open_recordings_requested = Signal()
     recent_session_requested = Signal(str)  # session_id
+    settings_requested = Signal()
+    notification_clicked = Signal()
     quit_requested = Signal()
 
     def __init__(self) -> None:
@@ -41,7 +49,8 @@ class TrayController(QObject):
         self._current_state = RecordingState.IDLE
         self._tray = QSystemTrayIcon()
         self._tray.setIcon(icon_for_state(RecordingState.IDLE))
-        self._tray.setToolTip("LocalMeetingRecorder")
+        self._tray.setToolTip(APP_DISPLAY_NAME)
+        self._tray.messageClicked.connect(self.notification_clicked)
 
         self._menu = QMenu()
         self._status_action = self._menu.addAction(_STATUS_LABELS[RecordingState.IDLE])
@@ -59,6 +68,9 @@ class TrayController(QObject):
 
         open_action = self._menu.addAction("Open Recordings Folder")
         open_action.triggered.connect(self.open_recordings_requested)
+
+        settings_action = self._menu.addAction("Settings…")
+        settings_action.triggered.connect(self.settings_requested)
         self._menu.addSeparator()
 
         quit_action = self._menu.addAction("Quit")
@@ -88,13 +100,75 @@ class TrayController(QObject):
         text = f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes}:{seconds:02d}"
         self._status_action.setText(f"Recording — {text}")
 
-    def set_recent_sessions(self, sessions: Sequence[SessionMetadata]) -> None:
+    def set_recent_sessions(
+        self,
+        sessions: Sequence[SessionMetadata],
+        *,
+        transcription_progress: Mapping[str, float] | None = None,
+    ) -> None:
         self._recent_menu.clear()
         self._recent_menu.setEnabled(bool(sessions))
+        progress = transcription_progress or {}
         for metadata in sessions:
             label = metadata.title or metadata.session_id
+            suffixes = [
+                s
+                for s in (
+                    self._transcription_suffix(metadata, progress.get(metadata.session_id)),
+                    self._diarization_suffix(metadata),
+                    self._summary_suffix(metadata),
+                )
+                if s
+            ]
+            if suffixes:
+                label = f"{label} — {', '.join(suffixes)}"
             action = self._recent_menu.addAction(label)
             action.triggered.connect(self._make_recent_session_handler(metadata.session_id))
+
+    @staticmethod
+    def _transcription_suffix(metadata: SessionMetadata, progress_pct: float | None) -> str | None:
+        status = metadata.post_processing.transcript_status
+        if status is TranscriptionStatus.RUNNING:
+            return (
+                f"Transcribing… {progress_pct:.0f}%"
+                if progress_pct is not None
+                else "Transcribing…"
+            )
+        if status is TranscriptionStatus.DONE:
+            language = metadata.post_processing.transcript_language
+            return f"Transcribed ({language})" if language else "Transcribed"
+        if status is TranscriptionStatus.PARTIAL:
+            return "Transcribed (partial)"
+        if status is TranscriptionStatus.FAILED:
+            return "Transcription failed"
+        return None
+
+    @staticmethod
+    def _diarization_suffix(metadata: SessionMetadata) -> str | None:
+        status = metadata.post_processing.diarization_status
+        if status is DiarizationStatus.RUNNING:
+            return "identifying speakers…"
+        if status is DiarizationStatus.DONE:
+            if metadata.post_processing.diarization_has_unknown_speaker:
+                # At least one system-audio segment couldn't be confidently matched to
+                # a clustered speaker — "identified" alone would overstate how complete
+                # the attribution actually is.
+                return "speakers partially identified"
+            return "speakers identified"
+        if status is DiarizationStatus.FAILED:
+            return "speaker ID failed"
+        return None
+
+    @staticmethod
+    def _summary_suffix(metadata: SessionMetadata) -> str | None:
+        status = metadata.post_processing.summary_status
+        if status is SummaryStatus.RUNNING:
+            return "summarizing…"
+        if status is SummaryStatus.DONE:
+            return "summarized"
+        if status is SummaryStatus.FAILED:
+            return "summary failed"
+        return None
 
     def _make_recent_session_handler(self, session_id: str) -> Callable[[bool], None]:
         def handler(checked: bool = False) -> None:

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import sys
 
+from local_meeting_recorder import APP_DISPLAY_NAME
 from local_meeting_recorder.app import Application
 from local_meeting_recorder.capture.factory import default_backend_factory
 from local_meeting_recorder.config import Settings, load_settings
@@ -36,8 +37,8 @@ def main() -> int:
         with SingleInstanceGuard(paths.root / "app.lock"):
             return _run(paths, settings)
     except AlreadyRunningError:
-        log.error("another instance of LocalMeetingRecorder is already running")
-        print("LocalMeetingRecorder is already running.", file=sys.stderr)
+        log.error("another instance of %s is already running", APP_DISPLAY_NAME)
+        print(f"{APP_DISPLAY_NAME} is already running.", file=sys.stderr)
         return 1
 
 

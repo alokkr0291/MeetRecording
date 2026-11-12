@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import QMessageBox, QWidget
 
+from local_meeting_recorder import APP_DISPLAY_NAME
 from local_meeting_recorder.capture.protocols import PermissionStatus
 from local_meeting_recorder.ui.shell import Runner, default_runner, open_url
 
@@ -48,7 +49,7 @@ def show_permission_guide(status: PermissionStatus, parent: QWidget | None = Non
     box.setText(
         describe_missing_permissions(status)
         + "\n\nAfter granting access in System Settings, quit and reopen "
-        "LocalMeetingRecorder, then try again."
+        f"{APP_DISPLAY_NAME}, then try again."
     )
     screen_button = (
         box.addButton("Open Screen Recording Settings", QMessageBox.ButtonRole.ActionRole)

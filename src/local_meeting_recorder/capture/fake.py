@@ -49,6 +49,10 @@ class FakeCaptureBackend:
         )
     )
     displays: list[DisplayInfo] = field(default_factory=lambda: [_DEFAULT_DISPLAY])
+    # Simulates what the live OS consent dialog decided: if set, `request_permissions()`
+    # reports (and `permissions` is updated to) this instead of the current snapshot —
+    # e.g. a test can start from NOT_DETERMINED and script the user clicking "Allow".
+    permissions_after_request: PermissionStatus | None = None
 
     # Scripted failures/delays, set by the test before calling the method they affect.
     fail_start_with: Exception | None = None
@@ -59,6 +63,7 @@ class FakeCaptureBackend:
     start_calls: list[StartOptions] = field(default_factory=list, init=False)
     stop_calls: int = field(default=0, init=False)
     shutdown_calls: int = field(default=0, init=False)
+    request_permissions_calls: int = field(default=0, init=False)
 
     _recording: bool = field(default=False, init=False)
     _last_options: StartOptions | None = field(default=None, init=False)
@@ -72,6 +77,9 @@ class FakeCaptureBackend:
         return self.permissions
 
     def request_permissions(self, *, timeout: float = 30.0) -> PermissionsRequestResult:
+        self.request_permissions_calls += 1
+        if self.permissions_after_request is not None:
+            self.permissions = self.permissions_after_request
         return PermissionsRequestResult(
             screen=self.permissions.screen,
             screen_preflight=self.permissions.screen_preflight,

@@ -14,7 +14,6 @@ def test_defaults() -> None:
     assert s.video_fps == 30
     assert s.capture_microphone is True
     assert s.log_level == "INFO"
-    assert s.ollama_base_url.startswith("http://127.0.0.1")
 
 
 def test_env_prefix_and_path_expansion(monkeypatch: pytest.MonkeyPatch) -> None:

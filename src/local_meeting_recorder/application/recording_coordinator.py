@@ -34,6 +34,7 @@ from local_meeting_recorder.application.recovery import recover_incomplete_sessi
 from local_meeting_recorder.capture.protocols import (
     CaptureBackend,
     CaptureCallbacks,
+    PermissionsRequestResult,
     PermissionStatus,
     StartedInfo,
     StartOptions,
@@ -119,6 +120,19 @@ class RecordingCoordinator:
         permission guide before even offering the consent dialog.
         """
         return self._backend.check_permissions(
+            timeout=timeout if timeout is not None else self._settings.helper_start_timeout_s
+        )
+
+    def request_permissions(self, *, timeout: float | None = None) -> PermissionsRequestResult:
+        """Actively trigger the OS consent prompt for any not-yet-determined permission.
+
+        Unlike ``check_permissions`` (a passive read of cached TCC state), this is the only
+        path that calls ``AVCaptureDevice.requestAccess``/``CGPreflightScreenCaptureAccess``
+        under the hood. A permission the user never answered has no entry in System
+        Settings' privacy pane to toggle, so the UI must call this — not just
+        ``check_permissions`` — before falling back to "open Settings" guidance.
+        """
+        return self._backend.request_permissions(
             timeout=timeout if timeout is not None else self._settings.helper_start_timeout_s
         )
 

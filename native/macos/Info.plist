@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleIdentifier</key>
-	<string>com.localmeetingrecorder.capture-helper</string>
+	<string>com.localmeetingrecorder.app</string>
 	<key>CFBundleName</key>
 	<string>lmr-capture-helper</string>
 	<key>CFBundleDisplayName</key>
-	<string>LocalMeetingRecorder Capture Helper</string>
+	<string>My Recorder Capture Helper</string>
 	<key>CFBundleExecutable</key>
 	<string>lmr-capture-helper</string>
 	<key>CFBundleShortVersionString</key>
@@ -19,10 +19,10 @@
 	<key>LSMinimumSystemVersion</key>
 	<string>15.0</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>LocalMeetingRecorder records your microphone so your own voice is part of the meeting recording. Audio never leaves this Mac.</string>
+	<string>My Recorder records your microphone so your own voice is part of the meeting recording. Audio never leaves this Mac.</string>
 	<key>NSAudioCaptureUsageDescription</key>
-	<string>LocalMeetingRecorder records system audio so the other participants' voices are part of the meeting recording. Audio never leaves this Mac.</string>
+	<string>My Recorder records system audio so the other participants' voices are part of the meeting recording. Audio never leaves this Mac.</string>
 	<key>NSScreenCaptureUsageDescription</key>
-	<string>LocalMeetingRecorder records the selected display so the meeting video is part of the recording. Video never leaves this Mac.</string>
+	<string>My Recorder records the selected display so the meeting video is part of the recording. Video never leaves this Mac.</string>
 </dict>
 </plist>

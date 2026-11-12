@@ -14,6 +14,11 @@ dependencies = [
     "PySide6>=6.8,<7",
     "pydantic>=2.7,<3",
     "pydantic-settings>=2.3,<3",
+    # Secure credential storage (Phase 4.5): macOS Keychain via ctypes bindings to
+    # Security.framework, no pyobjc. Chosen over shelling out to the `security` CLI
+    # because `security add-generic-password -w <secret>` exposes the secret on argv
+    # (briefly visible to `ps`), which conflicts with "never print complete API keys."
+    "keyring>=25.0,<26",
 ]
 
 [project.optional-dependencies]
@@ -23,8 +28,49 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.11",
 ]
-transcription = ["faster-whisper>=1.1"]
+transcription = [
+    "faster-whisper>=1.1",
+    # faster-whisper 1.2.1 calls av.open(..., metadata_errors=...), a kwarg PyAV dropped
+    # in 19.0 (TypeError at runtime, found during Phase 4 implementation/testing).
+    # faster-whisper declares only "av>=11" with no upper bound, so pip resolves the
+    # broken 19.x by default; pin below it until upstream adds its own ceiling.
+    "av<19",
+]
 packaging = ["pyinstaller>=6.10"]
+diarization = [
+    # The one deliberate heavyweight-dependency exception in this project (pulls in
+    # PyTorch + torchaudio transitively) — justified because pyannote.audio is the
+    # de facto standard everything else (incl. WhisperX) builds on, MIT-licensed, and
+    # the only mature option that isn't torch-based too (resemblyzer) or unproven
+    # (ONNX/DIY pipelines) — see IMPLEMENTATION_STATUS.md's Phase 5C research summary.
+    "pyannote.audio>=3.1,<4",
+    # A real, found-by-installing-it incompatibility (same pattern as the `av<19`
+    # lesson): a plain `pip install pyannote.audio` resolves torch 2.15.x + the latest
+    # available torchaudio (2.11.1, which no longer has `AudioMetaData` — torchaudio has
+    # been deprecating its own audio I/O API in favor of `torchcodec`) +
+    # pytorch-metric-learning>=3.0.2 (which itself requires torch>=2.14, incompatible
+    # with any older torchaudio that still has `AudioMetaData`). Pin all three to a
+    # verified-compatible set instead.
+    #
+    # Phase 6 (CPU-first readiness) — IMPORTANT for anyone installing this extra on
+    # Windows or Linux: PyPI's default `torch`/`torchaudio` wheel for those platforms is
+    # the CUDA-enabled build, which pulls multi-gigabyte NVIDIA CUDA/cuDNN runtime
+    # libraries even on a machine with no GPU at all (macOS has no such problem — PyPI's
+    # macOS wheels are CPU/MPS-only, there is no separate CUDA variant). This app never
+    # needs or uses a GPU for either Whisper or pyannote (see
+    # `transcription/engine.py`/`speaker/pyannote_engine.py` — both are pinned to
+    # `device="cpu"` explicitly, never auto-detected). On Windows/Linux, install the
+    # CPU-only wheel instead:
+    #   pip install --index-url https://download.pytorch.org/whl/cpu torch==2.6.0 torchaudio==2.6.0
+    #   pip install ".[diarization]"
+    # or use scripts/install_diarization_cpu.sh / .ps1, which wrap exactly this. Plain
+    # pip cannot express "the CPU variant of this exact pin" declaratively inside
+    # pyproject.toml across every platform — this is a real ecosystem limitation, not
+    # something fixable from this file alone.
+    "torch==2.6.0",
+    "torchaudio==2.6.0",
+    "pytorch-metric-learning==2.8.1",
+]
 
 [project.scripts]
 local-meeting-recorder = "local_meeting_recorder.main:main"
@@ -53,6 +99,15 @@ ignore = [
 "tests/**" = ["ANN", "PLR", "T20"]
 "src/local_meeting_recorder/main.py" = ["T20"]
 "scripts/*.py" = ["T20"]
+# Deliberately deferred: pyannote.audio pulls in PyTorch, an optional extra most users
+# never install — a module-level import here would make every importer of this module
+# (and transitively, the whole app, same as transcription/engine.py already does for
+# faster_whisper) require it just to start.
+"src/local_meeting_recorder/speaker/pyannote_engine.py" = ["PLC0415"]
+# Same reasoning, test side: the module-level `pytestmark = skipif(not installed)` only
+# takes effect if the module can be *imported* first — a top-level `pyannote.core`
+# import would turn "not installed" into a collection error instead of a clean skip.
+"tests/unit/speaker/test_pyannote_engine.py" = ["PLC0415"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -70,6 +125,14 @@ pretty = true
 module = ["PySide6.*", "shiboken6.*"]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = ["pyannote.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["faster_whisper.*", "ctranslate2.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 timeout = 120
@@ -78,5 +141,6 @@ markers = [
     "hardware: requires real capture hardware and macOS permissions (LMR_HW_TESTS=1)",
     "packaging: requires a built application bundle (LMR_PACKAGING_TESTS=1)",
     "ffmpeg: requires ffmpeg/ffprobe on PATH",
+    "whisper: requires a real faster-whisper model load/run (LMR_WHISPER_TESTS=1)",
 ]
 filterwarnings = ["error::DeprecationWarning:local_meeting_recorder.*"]

@@ -39,7 +39,19 @@ swiftc "${OPT_FLAGS[@]}" \
   "$SRC_DIR"/*.swift
 
 # Ad-hoc signature so the binary runs locally; Phase 6 replaces this with a Developer ID signature.
-codesign --force --sign - --identifier com.localmeetingrecorder.capture-helper "$OUT" >/dev/null 2>&1 || true
+#
+# --identifier is deliberately the MAIN APP's bundle ID, not a distinct helper ID: real-world
+# testing of the packaged app (session 12) showed Screen Recording permission checks made from
+# this helper never resolved to the main app's already-granted TCC entry when launched as a
+# subprocess of the frozen "My Recorder.app" — `AVCaptureDevice.authorizationStatus` (used for
+# microphone) correctly fell back to the responsible parent process, but
+# `CGPreflightScreenCaptureAccess`/`SCShareableContent` (used for screen recording) did not,
+# confirmed by reading the real system TCC database directly (`com.localmeetingrecorder.app`
+# showed auth_value=2/granted while the app still re-prompted every launch). Signing the helper
+# under the SAME identifier as the main app sidesteps that responsible-process resolution gap
+# entirely: TCC looks up the identifier the helper is actually signed as, which is now the one
+# already granted, rather than needing to delegate to an ancestor process at all.
+codesign --force --sign - --identifier com.localmeetingrecorder.app "$OUT" >/dev/null 2>&1 || true
 chmod +x "$OUT"
 echo "==> built $OUT ($(du -h "$OUT" | cut -f1))"
 "$OUT" --version

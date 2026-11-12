@@ -162,31 +162,216 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for full diagrams. Layers:
   recording through the UI is still blocked on the same Screen Recording permission issue
   as Phase 2d/3a.
 
-### Phase 4 — Transcription + Library [FUTURE]
-- SQLite schema + Alembic-style migrations
-- `storage/database.py`, FTS5 index on transcript text
-- `transcription/protocol.py`, `transcription/faster_whisper_backend.py`
-- Job queue with progress events, retry, recording preserved on failure
-- User prompted before model download
+### Phase 4 — Transcription [IMPLEMENTED, see IMPLEMENTATION_STATUS.md]
+- `media/audio_extractor.py` — ffmpeg mixdown of every audio track to 16 kHz mono WAV
+- `transcription/engine.py` — `faster-whisper`, lazy model load, explicit/auto language
+- `transcription/models.py`, `transcription/store.py` — typed, validated, atomically
+  written `transcript.json`/`transcript.txt` per session
+- `transcription/manager.py` — one background thread per session, duplicate-run
+  prevention, retry, recording preserved on failure (`post_processing.transcript_status`,
+  never the session's own `status`)
+- `ui/transcript_dialog.py`, `ui/transcription_bridge.py` — viewer + retry action, tray
+  status suffix
+- Deferred: SQLite/FTS5 cross-session search (a Phase 4 sketch originally, superseded by
+  per-session file storage since nothing yet needs search across sessions — revisit if a
+  library/search UI is scoped later), and a user-facing confirmation prompt before the
+  first model download (currently downloads silently on first transcription; see
+  IMPLEMENTATION_STATUS.md)
 
-### Phase 5 — AI Summaries [FUTURE]
-- `summarization/ollama_client.py`
-- Structured summary schema (topics, decisions, action items, questions)
-- Chunking + map-reduce aggregation for long meetings
-- Prompt-injection hardening: transcript delimited, no tool use
-- Retry if model unavailable
+### Phase 4.5 — Application Settings and User Configuration [IMPLEMENTED, see IMPLEMENTATION_STATUS.md]
+- `settings/models.py`, `settings/service.py` — typed, versioned `AppSettings`,
+  atomically persisted to `settings.json` (separate from `config.py`'s env/`.env`/
+  `config.toml` dev settings, and from credentials, which never live here)
+- `infrastructure/credentials/` — provider-neutral `CredentialStore` protocol;
+  `MacOSKeychainStore` via the `keyring` package; an explicit `UnavailableCredentialStore`
+  for any platform with no secure store yet (never a silent plaintext fallback)
+- `transcription/providers/` — `OpenAITranscriptionClient` and
+  `OpenRouterTranscriptionClient`, both real and implemented (verified against each
+  provider's published API reference first), behind a shared
+  `TranscriptionProviderClient` protocol alongside local `TranscriptionEngine`; a cloud
+  provider with no API key configured fails that one transcription job only, never the
+  recording, never the app
+- `storage/paths.py` — configurable recordings directory, validated before accepting;
+  every previous location stays visible (`additional_recordings_dirs`) so a setting
+  change never hides old recordings
+- `ui/settings_dialog.py`, `ui/tray.py`'s "Settings…" item — General (storage
+  location), Transcription (provider + model + masked API key + Test Connection),
+  About; no accounts, no sign-in, no API key ever required for local recording
 
-### Phase 6 — Packaging [FUTURE]
+### Phase 5 — AI Meeting Intelligence, Model Selection and Speaker Attribution
+
+Parts A+B [IMPLEMENTED, see IMPLEMENTATION_STATUS.md]:
+- Part A: verified (required before any implementation) that the recording already
+  captures system and microphone audio as genuinely separate tracks — confirmed against
+  a real hardware-captured `.mov`, not just by reading the Swift source
+- Part B: `media/audio_extractor.py::extract_track_wav16k_mono()` (isolate one track, no
+  mixing), `transcription/models.py` (`AudioSource`, `TranscriptSegment.source`,
+  `Transcript.source_errors`), `domain/session_metadata.py`
+  (`TranscriptionStatus.PARTIAL`), `transcription/manager.py` (independent
+  extraction+transcription per source, merged onto one timeline, one source's failure
+  does not fail the other)
+
+Parts C+E [IMPLEMENTED, see IMPLEMENTATION_STATUS.md Phases 5C/5E — session 10]:
+- Part C: speaker **diarization** — `speaker/` (`pyannote/speaker-diarization-3.1` via
+  `pyannote.audio`), distinguishes individual remote speakers within the system-audio
+  track; the microphone track is always the fixed "You" identity, never diarized
+- Objective 1: configurable AI models for meeting **summaries** — `summarization/`
+  (Ollama/OpenAI/OpenRouter provider clients + structured schema), independent
+  provider/model selection from the transcription settings
+- Both were found already implemented but uncommitted and undocumented at the start of
+  session 10; an engineering audit was run first, then the bugs/gaps it found were
+  fixed (single-track diarization silently tagging nothing, a transcript write race
+  between retry-transcription and diarization, no prompt-injection hardening despite
+  this being an explicit original requirement below, no Ollama model-availability
+  check, silent missing-API-key summary failures) — see IMPLEMENTATION_STATUS.md for
+  the full list.
+- **Not verified against real models/providers**: no Hugging Face token, local Ollama
+  server, or cloud API key was available in the environment that implemented and fixed
+  this — gated real-model tests exist (`LMR_DIARIZATION_TESTS=1`,
+  `LMR_OLLAMA_TESTS=1`, `LMR_OPENAI_SUMMARY_TESTS=1`, `LMR_OPENROUTER_SUMMARY_TESTS=1`)
+  but have never actually been run.
+
+Original Phase 5 roadmap (AI summaries) [IMPLEMENTED, see Phase 5E]:
+- `summarization/ollama_client.py` — done, plus OpenAI/OpenRouter
+- Structured summary schema (topics, decisions, action items, questions) — done
+- Chunking + map-reduce aggregation for long meetings — **not done**; a transcript is
+  sent to the provider in one request regardless of length. Fine for a typical meeting
+  within a model's context window; an open gap for very long transcripts.
+- Prompt-injection hardening: transcript delimited, no tool use — done (session 10 fix;
+  this had been skipped when the feature was first built)
+- Retry if model unavailable — manual retry only (the user clicks Regenerate); no
+  automatic retry/backoff on a transient failure
+
+Phase 5F — Summary export and evidence [IMPLEMENTED, see IMPLEMENTATION_STATUS.md —
+session 10]:
+- `summary.md` Markdown export of the latest summary version (title, date,
+  provider/model, executive summary, topics, decisions, action items, speakers,
+  resolved timestamp references)
+- `Decision.segment_refs`/`ActionItem.segment_refs`: additive, backward-compatible
+  indices into the transcript's segments, when the model could identify supporting
+  evidence — never invented, never required
+- Storage architecture intentionally unchanged for this pass (flat
+  `recordings/<session_id>/` per meeting, no database, no year/month hierarchy, no
+  folder migration) — see SECURITY_AND_PRIVACY.md/ARCHITECTURE.md for the storage
+  layout as it actually exists today
+
+### Phase 6 — Packaging [IMPLEMENTED, see IMPLEMENTATION_STATUS.md]
 - PyInstaller spec with helper in `Contents/Helpers/`
 - `Info.plist`: `LSUIElement`, `NSMicrophoneUsageDescription`, `NSScreenCaptureUsageDescription`
-- Hardened runtime + `audio-input` entitlement
-- Code signing + notarization documentation (requires Apple Developer account)
-- Launch test on bare machine (outside PyCharm)
+- Ad-hoc signed (helper + bundle); Developer ID signing + notarization documented but
+  not performed — needs an Apple Developer Program enrollment this agent cannot obtain
+- Launch test on bare machine (outside PyCharm) — done via a fresh terminal launch
 
-### Phase 7 — Windows [FUTURE]
-- `capture/windows/backend.py` — Windows.Graphics.Capture + WASAPI loopback
-- Same `CaptureBackend` protocol; Windows-specific media writing
-- PyInstaller NSIS installer
+### Phase 6B — CPU-First, Low-Resource and Cross-Platform Readiness [IMPLEMENTED, see
+IMPLEMENTATION_STATUS.md]
+- Explicit CPU device for both local AI models (Whisper via faster-whisper,
+  diarization via pyannote) — never auto-detected, never a hidden GPU dependency.
+  "base" is now the recommended default Whisper model (was "small")
+- `settings/profiles.py`: a single "Low Resource / Balanced / Quality" processing
+  profile that sets the recommended Whisper model, caps CPU threads, and
+  enables/disables diarization — instead of exposing every individual knob
+- `infrastructure/resource_governor.py`: an app-wide (not per-session) limiter so two
+  different recordings' transcription/diarization/summarization jobs never run
+  concurrently on "Low Resource" — unlimited (unchanged) on Balanced/Quality
+- PyInstaller spec excludes the ~390MB `pyannote.audio`/`torch` dependency tree from
+  the default packaged app — diarization needs a developer-built "full" variant (not
+  yet built) or running from source with the extra installed
+- `scripts/install_diarization_cpu.{sh,ps1}`: install the CPU-only PyTorch wheel
+  (PyPI's default on Windows/Linux is the CUDA build) instead of the multi-gigabyte
+  CUDA runtime nobody asked for
+- Windows and Linux blockers inventoried (Phase 7 below expanded from 3 bullets into
+  a real gap analysis) — no Windows backend code was written, per explicit scope
+
+### Phase 7 — Windows [FUTURE — blockers inventoried in Phase 6B, nothing implemented]
+
+A gap analysis against the real `capture/protocols.py::CaptureBackend` Protocol (not a
+generic "needs Windows support" note) — every method a Windows backend must implement:
+`check_permissions`, `request_permissions`, `list_displays`, `start`, `stop`,
+`shutdown`, plus `is_recording`.
+
+**Real blockers (not yet resolved):**
+1. **No Windows capture code exists at all** — not even a stub. `capture/factory.py`
+   raises `HelperUnavailableError` for any non-`darwin` platform today; `sys.platform
+   == "win32"` has no branch.
+2. **No Windows development or test environment is available to this project** — every
+   Windows claim below is design analysis from documented platform APIs, not something
+   this agent (macOS-only sandbox) has built or run. Any Windows implementation can
+   only be verified by a human with real Windows hardware, the same way
+   `tests/capture/` is gated by `LMR_HW_TESTS=1` and a real Mac today.
+3. **Screen + audio capture technology choice is still open, with a real architectural
+   fork**: (a) mirror the macOS design — a small native helper process (C++ or C#/.NET;
+   .NET gives faster access to WinRT `Windows.Graphics.Capture` projections and WASAPI
+   via NAudio, at the cost of a larger self-contained deployment, roughly 60–150MB) that
+   the Python app talks to, matching the existing `HelperClient`/JSON-lines pattern; or
+   (b) skip a native helper entirely and capture directly from Python via
+   `pycaw`(WASAPI)/`dxcam`/`mss`(screen) — meaningfully less work, but less control over
+   encoding and likely needs ffmpeg (or another Python encoder) in the loop for the
+   output container. Neither choice is made yet; this needs a decision before any code
+   is written, not an assumption that the Swift helper's shape is the only option.
+4. **Likely APIs, if the native-helper path is chosen** (standard, well-documented
+   Windows mechanisms, not verified against a live implementation): screen —
+   `Windows.Graphics.Capture` (Windows 10 version 1803+, broader capability from
+   2004+) or the lower-level DXGI Desktop Duplication API; system-audio loopback and
+   microphone — WASAPI (`IAudioClient` with `AUDCLNT_STREAMFLAGS_LOOPBACK` for "what
+   you hear", standard capture mode for the microphone); encoding — Media Foundation
+   Sink Writer, or hand the raw frames to ffmpeg (already a runtime dependency on every
+   platform) instead of a native encoder.
+5. **The two-audio-track guarantee must be explicitly preserved, not assumed.** Phase
+   5A/B/C (source separation, diarization) all depend on the recording file containing
+   system and microphone audio as genuinely separate tracks — verified on macOS against
+   real hardware (`native/macos/PROTOCOL.md`'s `started.tracks`). Whatever Windows
+   encoding path is chosen must be verified the same way, with `ffprobe` against a real
+   Windows recording — never assumed from documentation alone (same standard this
+   project already holds itself to for macOS, see CLAUDE.md's ground rules).
+6. **Permission/consent model does not map 1:1.** macOS's TCC (Screen Recording /
+   Microphone grants, surfaced via `PermissionStatus`/`request_permissions()`) has no
+   exact Windows equivalent for a standard (unpackaged) desktop app — WASAPI loopback
+   and Desktop Duplication/Graphics.Capture generally don't require an OS-level consent
+   grant the way macOS does, though Windows 11 shows its own capture indicator/
+   notification outside the app's control. A Windows `CaptureBackend.check_permissions()`
+   would likely just report "granted" unconditionally for both — which the existing
+   `consent_dialog.py` (the app's own, OS-independent "has everyone been informed?"
+   popup) already covers regardless. Needs a product decision, not a blocker to
+   capture itself.
+7. **ffmpeg/ffprobe are not bundled or guaranteed present on Windows** — the Python
+   side assumes they're on PATH (true in most macOS dev setups via Homebrew, not true
+   out of the box on Windows). Packaging/bundling ffmpeg for Windows (or a first-run
+   "please install ffmpeg" flow) is a new, Windows-specific requirement, not something
+   Phase 6's packaging work already covers.
+8. **`infrastructure/single_instance.py` is POSIX-only** (already documented in its own
+   module docstring) — currently a silent no-op on Windows rather than a hard failure;
+   needs a named-mutex-based implementation.
+9. **PyInstaller packaging for Windows** — an NSIS or MSI installer, plus the same
+   "exclude the diarization dependency tree by default" discipline Phase 6B's macOS
+   spec now has; not yet attempted.
+
+**Smaller than it looks:** cloud credential storage (OpenAI/OpenRouter/Hugging Face
+tokens) is *not* a real blocker — `infrastructure/credentials/factory.py` already
+returns `UnavailableCredentialStore` on non-macOS today, but the `keyring` package
+(already a core dependency) ships a Windows Credential Manager backend
+(`keyring/backends/Windows.py`, confirmed present in this project's own installed
+`keyring`) with the identical `get_password`/`set_password`/`delete_password` calls
+`MacOSKeychainStore` already uses. A `WindowsCredentialManagerStore` (or a single
+platform-neutral `KeyringCredentialStore` replacing both) is close to a rename, not new
+design — deliberately not implemented in this pass since it is credential storage, not
+"the Windows backend," and doing it now would have been scope creep beyond the explicit
+instruction to only inventory Windows blockers.
+
+**Suggested phased order, once someone decides to actually build this:**
+1. Decide the architecture fork (native helper vs. pure-Python capture) — a real product
+   decision, not an engineering detail.
+2. Build the chosen capture path as a throwaway script first (same spirit as the macOS
+   helper's own development) and verify with `ffprobe` that it produces a video track
+   plus two independent audio tracks, on real Windows hardware.
+3. Implement `capture/windows/backend.py` against the existing `CaptureBackend`
+   protocol — nothing above `capture/factory.py` should need to change, by design.
+4. `infrastructure/single_instance.py`'s named-mutex branch.
+5. `WindowsCredentialManagerStore` (see above — the easy win).
+6. ffmpeg availability story (bundle vs. first-run install flow) and the NSIS/MSI
+   installer.
+7. A hardware-gated test suite mirroring `tests/capture/` (`LMR_HW_TESTS=1`), run by a
+   human with real Windows hardware — this project's own standard for "don't claim
+   capture works because it compiles" applies identically here.
 
 ---
 

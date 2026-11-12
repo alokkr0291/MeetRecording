@@ -5,7 +5,11 @@ from __future__ import annotations
 from PySide6.QtWidgets import QApplication
 
 from local_meeting_recorder.domain.recording_state import RecordingState
-from local_meeting_recorder.domain.session_metadata import SessionMetadata
+from local_meeting_recorder.domain.session_metadata import (
+    DiarizationStatus,
+    SessionMetadata,
+    TranscriptionStatus,
+)
 from local_meeting_recorder.ui.tray import TrayController
 
 
@@ -85,6 +89,84 @@ def test_clicking_recent_session_emits_its_id(qapp: QApplication) -> None:
     assert emitted == ["lmr_20261104T000002_cccc"]
 
 
+def test_recent_sessions_show_no_suffix_when_not_started(qapp: QApplication) -> None:
+    tray = TrayController()
+    tray.set_recent_sessions(
+        [SessionMetadata(session_id="lmr_20261104T000000_aaaa", title="Standup")]
+    )
+    assert tray._recent_menu.actions()[0].text() == "Standup"
+
+
+def test_recent_sessions_show_transcribing_suffix(qapp: QApplication) -> None:
+    tray = TrayController()
+    metadata = SessionMetadata(session_id="lmr_20261104T000000_aaaa", title="Standup")
+    metadata.post_processing.transcript_status = TranscriptionStatus.RUNNING
+    tray.set_recent_sessions([metadata])
+    assert tray._recent_menu.actions()[0].text() == "Standup — Transcribing…"
+
+
+def test_recent_sessions_show_progress_percentage_while_transcribing(qapp: QApplication) -> None:
+    tray = TrayController()
+    metadata = SessionMetadata(session_id="lmr_20261104T000000_aaaa", title="Standup")
+    metadata.post_processing.transcript_status = TranscriptionStatus.RUNNING
+    tray.set_recent_sessions([metadata], transcription_progress={metadata.session_id: 42.3})
+    assert tray._recent_menu.actions()[0].text() == "Standup — Transcribing… 42%"
+
+
+def test_recent_sessions_show_transcribed_with_language(qapp: QApplication) -> None:
+    tray = TrayController()
+    metadata = SessionMetadata(session_id="lmr_20261104T000000_aaaa", title="Standup")
+    metadata.post_processing.transcript_status = TranscriptionStatus.DONE
+    metadata.post_processing.transcript_language = "en"
+    tray.set_recent_sessions([metadata])
+    assert tray._recent_menu.actions()[0].text() == "Standup — Transcribed (en)"
+
+
+def test_recent_sessions_show_failed_suffix(qapp: QApplication) -> None:
+    tray = TrayController()
+    metadata = SessionMetadata(session_id="lmr_20261104T000000_aaaa", title="Standup")
+    metadata.post_processing.transcript_status = TranscriptionStatus.FAILED
+    tray.set_recent_sessions([metadata])
+    assert tray._recent_menu.actions()[0].text() == "Standup — Transcription failed"
+
+
+def test_recent_sessions_show_partial_suffix(qapp: QApplication) -> None:
+    tray = TrayController()
+    metadata = SessionMetadata(session_id="lmr_20261104T000000_aaaa", title="Standup")
+    metadata.post_processing.transcript_status = TranscriptionStatus.PARTIAL
+    tray.set_recent_sessions([metadata])
+    assert tray._recent_menu.actions()[0].text() == "Standup — Transcribed (partial)"
+
+
+def test_recent_sessions_show_speakers_identified_suffix(qapp: QApplication) -> None:
+    tray = TrayController()
+    metadata = SessionMetadata(session_id="lmr_20261104T000000_aaaa", title="Standup")
+    metadata.post_processing.transcript_status = TranscriptionStatus.DONE
+    metadata.post_processing.transcript_language = "en"
+    metadata.post_processing.diarization_status = DiarizationStatus.DONE
+    tray.set_recent_sessions([metadata])
+    assert tray._recent_menu.actions()[0].text() == (
+        "Standup — Transcribed (en), speakers identified"
+    )
+
+
+def test_recent_sessions_show_partially_identified_suffix_when_a_speaker_is_unknown(
+    qapp: QApplication,
+) -> None:
+    """A diarization run that leaves at least one segment ``UNKNOWN_SPEAKER_ID`` must
+    not be reported the same way as a fully-resolved one."""
+    tray = TrayController()
+    metadata = SessionMetadata(session_id="lmr_20261104T000000_aaaa", title="Standup")
+    metadata.post_processing.transcript_status = TranscriptionStatus.DONE
+    metadata.post_processing.transcript_language = "en"
+    metadata.post_processing.diarization_status = DiarizationStatus.DONE
+    metadata.post_processing.diarization_has_unknown_speaker = True
+    tray.set_recent_sessions([metadata])
+    assert tray._recent_menu.actions()[0].text() == (
+        "Standup — Transcribed (en), speakers partially identified"
+    )
+
+
 def test_start_and_stop_actions_emit_signals(qapp: QApplication) -> None:
     tray = TrayController()
     starts = []
@@ -98,3 +180,13 @@ def test_start_and_stop_actions_emit_signals(qapp: QApplication) -> None:
     tray.set_state(RecordingState.RECORDING)  # Stop is only enabled while active
     tray._stop_action.trigger()
     assert stops == [1]
+
+
+def test_settings_menu_item_emits_settings_requested(qapp: QApplication) -> None:
+    tray = TrayController()
+    requests: list[int] = []
+    tray.settings_requested.connect(lambda: requests.append(1))
+
+    settings_action = next(a for a in tray._menu.actions() if a.text() == "Settings…")
+    settings_action.trigger()
+    assert requests == [1]
