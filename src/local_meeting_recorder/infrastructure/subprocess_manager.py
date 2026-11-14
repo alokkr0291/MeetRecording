@@ -13,6 +13,7 @@ import contextlib
 import os
 import signal
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -144,16 +145,16 @@ class ManagedProcess:
             self.close_stdin()
             if not self._wait(proc, eof_grace_s):
                 log.warning(
-                    "subprocess ignored stdin EOF, sending SIGTERM",
+                    "subprocess ignored stdin EOF, terminating",
                     extra={"proc": self._name, "pid": proc.pid},
                 )
-                self._signal(proc, signal.SIGTERM)
+                self._terminate(proc)
                 if not self._wait(proc, term_grace_s):
                     log.error(
-                        "subprocess ignored SIGTERM, sending SIGKILL",
+                        "subprocess ignored terminate, killing",
                         extra={"proc": self._name, "pid": proc.pid},
                     )
-                    self._signal(proc, signal.SIGKILL)
+                    self._kill(proc)
                     proc.wait()
         self.join(timeout=5.0)
         return proc.returncode
@@ -230,13 +231,34 @@ class ManagedProcess:
         return proc.poll() is not None
 
     @staticmethod
-    def _signal(proc: subprocess.Popen[str], sig: signal.Signals) -> None:
+    def _terminate(proc: subprocess.Popen[str]) -> None:
+        """Ask the process to exit. POSIX: SIGTERM to its whole process group (started via
+        ``start_new_session=True``), which the helper can catch and handle gracefully.
+        Windows has no equivalent of a catchable SIGTERM for an arbitrary console process —
+        ``Popen.terminate()`` calls ``TerminateProcess``, an immediate hard stop; there is no
+        escalation left after this on Windows, but ``stop()`` still calls ``_kill`` next as a
+        harmless no-op/retry if the process is somehow still alive."""
+        if sys.platform == "win32":
+            proc.terminate()
+            return
         try:
-            os.killpg(proc.pid, sig)
+            os.killpg(proc.pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
         except PermissionError:
-            proc.send_signal(sig)
+            proc.send_signal(signal.SIGTERM)
+
+    @staticmethod
+    def _kill(proc: subprocess.Popen[str]) -> None:
+        if sys.platform == "win32":
+            proc.kill()
+            return
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            proc.send_signal(signal.SIGKILL)
 
     def _close_stderr(self) -> None:
         if self._stderr_file is not None:

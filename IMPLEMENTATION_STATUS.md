@@ -2,7 +2,7 @@
 
 Source of truth for progress across sessions. Update at the end of every working session.
 
-Last updated: 2026-11-12 (session 13)
+Last updated: 2026-11-12 (session 14)
 
 Legend: `DONE` = implemented and verified as described; `PARTIAL` = implemented, verification incomplete; `TODO` = not started; `BLOCKED` = cannot proceed without external input.
 
@@ -627,8 +627,52 @@ user hit on first real hardware test.
 
 ## Phase 7
 
-Not started beyond the gap analysis in PLAN.md's Phase 7 section (Phase 6B's Step 5).
-No `capture/windows/` code exists.
+Windows *capture* is now implemented — see Phase 8A below. What's still not started: an
+NSIS/MSI installer, `infrastructure/single_instance.py`'s named-mutex branch, and
+`WindowsCredentialManagerStore` (a near-free addition — `keyring` already ships a Windows
+backend). See PLAN.md's Phase 7 section for the full remaining inventory.
+
+## Phase 8A — Windows Native Capture Backend (session 14)
+
+Goal (explicit user spec): a Windows recording backend matching the macOS one's
+capabilities — screen capture, independent system-audio + microphone streams, start/stop
+through the existing Python app, output compatible with the existing transcription
+pipeline — implemented against the existing `CaptureBackend` protocol with no changes
+needed above `capture/factory.py`.
+
+| Task | Status | Notes |
+|---|---|---|
+| Architecture inspection first (as explicitly required) | DONE | Read `capture/protocols.py`, `capture/macos/{backend,helper_client}.py`, `infrastructure/subprocess_manager.py`, all 950 lines of `native/macos/Sources/main.swift`, `native/macos/PROTOCOL.md`, `domain/errors.py`, `storage/paths.py`, `capture/factory.py`, and the existing Phase 7 gap analysis (session 11) before writing anything. |
+| **Bug found in shared code**: `ManagedProcess._signal()` was POSIX-only | DONE | `os.killpg`/`signal.SIGKILL` don't exist on Windows (`signal.SIGKILL` isn't even defined in Python's `signal` module there) — would have raised `AttributeError` the first time a Windows helper needed force-killing. Fixed with platform-branched `_terminate`/`_kill` using `Popen.terminate()`/`Popen.kill()`, which Python already abstracts correctly. |
+| **Bug found in shared code**: `resolve_helper_binary()` hardcoded a macOS-only binary name/dev path | DONE | `HELPER_BINARY_NAME` is now platform-conditional (`.exe` suffix on `win32`); dev build dir branches between `native/macos/build/` and `native/windows/build/`. |
+| `HelperClient` relocated to a shared location | DONE | It had zero macOS-specific code (just drives a generic subprocess over JSON-lines) — moved from `capture/macos/helper_client.py` to `capture/helper_client.py` so `WindowsCaptureBackend` doesn't duplicate 300 lines of identical logic. Both `MacOSCaptureBackend` and `WindowsCaptureBackend` now share one implementation. |
+| `capture/windows/backend.py` (`WindowsCaptureBackend`) | DONE | Structurally identical to `MacOSCaptureBackend` — same methods, same error handling, different binary name/error messages. |
+| `capture/factory.py` Windows branch | DONE | `platform_name() == "win32"` returns a `WindowsCaptureBackend` factory. Also fixed a (pre-existing, unrelated-to-Windows) mypy false-positive: comparing `sys.platform` directly made every non-matching branch "unreachable" per mypy's platform narrowing on a Mac — switched to the existing `platform_name()` indirection already used elsewhere for this exact reason. |
+| **API verification before writing 600+ lines blind**: tested whether this (non-Windows) machine could even compile Windows-targeted C# | DONE, with a real finding | `dotnet` 9.0.300 is installed here. Confirmed `EnableWindowsTargeting=true` lets `dotnet build`/`dotnet publish --runtime win-x64` cross-compile from macOS. **But** the product spec's suggested `Windows.Graphics.Capture` API requires the WinRT projection toolchain (`Microsoft.Windows.CsWinRT`), whose code generator (`cswinrt.exe`) is itself a native Windows executable — "cannot execute binary file" on this Mac, a hard dead end, not a missing-package error. Switched to DXGI Desktop Duplication (`Vortice.DXGI`/`Vortice.Direct3D11`) + Media Foundation (`Vortice.MediaFoundation`) + NAudio (WASAPI) — confirmed via a throwaway probe project that all three restore and compile cleanly with zero native-toolchain dependency. This is a real, user-relevant architecture deviation from the original spec, documented in `native/windows/README.md`, not a silent substitution. |
+| Exact API signatures confirmed via assembly reflection, not guessed | DONE | Dumped the real public API of `Vortice.MediaFoundation`/`Vortice.DXGI`/`Vortice.Direct3D11`/`NAudio` from their restored NuGet DLLs (`IMFSinkWriter`, `MediaTypeAttributeKeys`, `IDXGIOutputDuplication.AcquireNextFrame`, `D3D11CreateDevice`, `WasapiLoopbackCapture`, etc.) before writing code against them — avoided an entire class of "plausible-looking but wrong" compile errors that guessing method signatures blind would have produced. |
+| `native/windows/LocalMeetingRecorder.Capture/` (C#) | DONE, compiles, never run | `Protocol.cs` (JSON-lines I/O, mirrors `Out.shared`/command parsing from main.swift), `StartRequest.cs` (command parsing + error codes matching `native/macos/PROTOCOL.md`'s table exactly), `Permissions.cs` (unconditionally "granted" — Windows has no TCC-equivalent consent gate for these APIs, confirmed in the existing Phase 7 gap analysis before this phase started), `Displays.cs` (`Screen.AllScreens` enumeration), `Recorder.cs` (DXGI Desktop Duplication video capture, NAudio WASAPI loopback + capture audio, Media Foundation Sink Writer encode/mux, stats, stop/finalize — the bulk of the logic, ~650 lines), `Program.cs` (entry point + stdin command loop). `dotnet build` and `dotnet publish --runtime win-x64 --self-contained false` both succeed with 0 warnings/0 errors; publish was actually run and produced a real `lmr-capture-helper.exe` (PE32+ x86-64 Windows executable, confirmed via `file`) plus its managed dependency DLLs. **Nothing beyond that has been verified** — see `native/windows/README.md`'s "Status" and "Known gaps" sections for the complete, specific list (WASAPI mix-format/resample assumption, multi-monitor DPI correlation, Desktop Duplication re-acquisition edge cases, AAC encoder format support). |
+| `scripts/build_helper_windows.ps1` | DONE, the `dotnet publish` command itself was tested | Mirrors `scripts/build_helper.sh`'s role. The exact `dotnet publish` invocation inside it was run directly (not just written) and confirmed to produce `native/windows/build/lmr-capture-helper.exe` successfully. |
+| Tests | DONE | `tests/unit/capture/test_factory.py` (new `win32` case + the pre-existing `win32`-raises case updated, since it's no longer unsupported), `tests/unit/test_storage.py` (new platform-specific dev-build-dir-selection test). `tests/capture/test_real_capture_windows.py` (new): a Windows+`LMR_HW_TESTS=1`-gated hardware test mirroring `test_real_capture.py` exactly (same ffprobe/RMS/sync-offset assertions, `.mp4` instead of `.mov`, PowerShell `SoundPlayer` instead of `afplay`, `tasklist` instead of `pgrep`) — correctly skips on this (non-Windows) machine; **has never run for real.** 465 tests total (463 + 2 new unit tests; the gated Windows hardware test adds to the skip count, not the pass count, on this machine). `ruff format --check`/`ruff check`/`mypy` all clean. |
+| Docs | DONE | `native/windows/README.md` (full design + an explicit "Status" section making the compile-vs-run distinction unmissable + a "Known gaps" list), `native/windows/PROTOCOL.md` (pointer to the one shared protocol doc, not a duplicate), `ARCHITECTURE.md`, `PLAN.md`, `TESTING.md`, this file. |
+
+### Known limitations (Phase 8A)
+
+- **Nothing in `native/windows/` has executed on real hardware.** This cannot be
+  overstated: every "done" above means "compiles and type-checks," never "captures a real
+  frame." No Windows machine was available during development. A human with real Windows
+  10 (19041+)/11 hardware must run `scripts/build_helper_windows.ps1` then
+  `LMR_HW_TESTS=1 pytest tests/capture/test_real_capture_windows.py -s -q` before this is
+  trusted for an actual meeting.
+- The WASAPI → AAC audio path assumes the capture device's mix format is close enough to
+  48kHz 16-bit that a direct sample-format conversion (no resampling) is acceptable — see
+  `native/windows/README.md`'s known-gaps list. Likely needs a real resampler if a given
+  machine's actual mix rate differs.
+- Windows packaging (PyInstaller spec, installer) was explicitly out of scope for this
+  phase (capture-only, per the product spec) and was not attempted.
+- `Recorder.cs`'s `VideoLoop` treats any `AcquireNextFrame` failure as fatal; Desktop
+  Duplication's well-known re-acquisition scenarios (display mode change, secure-desktop
+  transition, output loss) are not specifically handled, since verifying the right
+  behavior for each needs real hardware to trigger them.
 
 ## Known limitations and blockers
 

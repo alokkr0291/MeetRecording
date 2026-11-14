@@ -218,6 +218,18 @@ All notable changes to LocalMeetingRecorder. Format follows Keep a Changelog; ve
   `CoordinatorBridge.request_permissions_async()` actively trigger the real macOS
   consent prompt for a not-yet-determined permission instead of only ever reading
   cached status (see Fixed).
+- Phase 8A — Windows native capture backend. `native/windows/LocalMeetingRecorder.Capture/`
+  (C#): DXGI Desktop Duplication (screen) + NAudio WASAPI loopback/capture (system audio,
+  microphone) + Media Foundation `IMFSinkWriter` (H.264/AAC encode, MP4 mux) — a deliberate
+  deviation from the originally-suggested `Windows.Graphics.Capture`, whose WinRT
+  projection toolchain cannot even compile on a non-Windows build machine (see
+  `native/windows/README.md`). `capture/windows/backend.py` (`WindowsCaptureBackend`),
+  wired into `capture/factory.py`'s `win32` branch; shares the existing, now-relocated
+  `HelperClient` with macOS rather than duplicating it. `scripts/build_helper_windows.ps1`,
+  `tests/capture/test_real_capture_windows.py` (gated, mirrors the macOS hardware test).
+  **Compiles and type-checks (`dotnet build`/`dotnet publish` both verified); has never
+  run on real Windows hardware** — no Windows machine was available during development;
+  see `native/windows/README.md`'s "Status" section before relying on any of this.
 
 ### Changed
 - `application/recording_coordinator.py`: added `check_permissions()`, a read-only
@@ -356,6 +368,15 @@ All notable changes to LocalMeetingRecorder. Format follows Keep a Changelog; ve
   (`scripts/build_helper.sh`'s `codesign --identifier`, `native/macos/Info.plist`'s
   `CFBundleIdentifier`) instead of a distinct one, so no cross-process delegation is
   needed at all.
+- `infrastructure/subprocess_manager.py::ManagedProcess._signal()` called
+  `os.killpg(pid, signal.SIGKILL)` unconditionally — `os.killpg` doesn't exist on Windows
+  and `signal.SIGKILL` isn't even defined in Python's `signal` module there, so the first
+  time a Windows helper ever needed force-killing this would have raised `AttributeError`
+  instead of actually killing it. Found while building the Windows capture backend
+  (Phase 8A), before any Windows code tried to exercise this path. Fixed with
+  platform-branched `_terminate`/`_kill` using `Popen.terminate()`/`Popen.kill()`, which
+  Python already abstracts correctly cross-platform — the POSIX path (SIGTERM then
+  SIGKILL to the whole process group) is unchanged.
 
 ### Security
 - The transcript text handed to a summary provider (Ollama/OpenAI/OpenRouter) had no

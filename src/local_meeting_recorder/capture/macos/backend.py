@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from local_meeting_recorder.capture.macos.helper_client import HelperClient
+from local_meeting_recorder.capture.helper_client import HelperClient
 from local_meeting_recorder.capture.protocols import (
     CaptureCallbacks,
     DisplayInfo,

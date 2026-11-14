@@ -2,7 +2,7 @@
 
 ## Overview
 
-LocalMeetingRecorder is a macOS menu-bar application with a layered, platform-abstracted architecture. Python owns the application lifecycle, UI, storage, transcription, and summarization. A minimal Swift helper exclusively handles real-time capture (ScreenCaptureKit + AVAssetWriter), communicating with Python over a documented JSON-lines protocol.
+LocalMeetingRecorder is a macOS-first menu-bar application with a layered, platform-abstracted architecture. Python owns the application lifecycle, UI, storage, transcription, and summarization. A minimal native helper exclusively handles real-time capture, communicating with Python over one documented JSON-lines protocol — a Swift helper (ScreenCaptureKit + AVAssetWriter) on macOS, and as of Phase 8A a C# helper (DXGI Desktop Duplication + WASAPI + Media Foundation) on Windows, compiled but not yet verified on real hardware (see `native/windows/README.md`).
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -21,17 +21,21 @@ LocalMeetingRecorder is a macOS menu-bar application with a layered, platform-ab
 │    Capture Layer       │    │    Media Layer              │
 │  CaptureBackend proto  │    │  MediaInspector (ffprobe)  │
 │  MacOSCaptureBackend   │    │  PostProcessor (ffmpeg)    │
-│  HelperClient          │    │  SessionFinisher            │
-│  WindowsUnsupported    │    └────────────────────────────┘
+│  WindowsCaptureBackend │    │  SessionFinisher            │
+│  HelperClient (shared) │    └────────────────────────────┘
 └────────────┬──────────┘
-             │ JSON lines stdin/stdout
-┌────────────▼──────────────────────────────────────────┐
-│              native/macos/lmr-capture-helper          │
-│  (Swift 6.2, ScreenCaptureKit, AVAssetWriter)         │
-│  · SCStreamConfiguration: video + system + mic audio  │
-│  · Single AVAssetWriter, 3 inputs, shared SCK clock   │
-│  · Exits on stdin EOF (parent crash safety)           │
-└────────────────────────────────────────────────────────┘
+             │ JSON lines stdin/stdout — one shared HelperClient drives either helper
+    ┌────────┴────────┐
+    ▼                 ▼
+┌──────────────────────────────────┐  ┌─────────────────────────────────────┐
+│ native/macos/lmr-capture-helper  │  │ native/windows/...Capture.exe        │
+│ (Swift, ScreenCaptureKit,        │  │ (C#, DXGI Desktop Duplication,       │
+│  AVAssetWriter)                  │  │  WASAPI via NAudio, Media Foundation │
+│  · 1 AVAssetWriter, 3 inputs,    │  │  Sink Writer — Phase 8A, compiled    │
+│    shared SCK clock              │  │  but unverified on real hardware,    │
+│  · Exits on stdin EOF            │  │  see native/windows/README.md)       │
+│    (parent crash safety)         │  │  · Exits on stdin EOF (same reason)  │
+└───────────────────────────────────┘  └───────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────┐
 │                  Persistence Layer                      │
@@ -415,19 +419,27 @@ recording must stay reliable even when AI processing is slow.
 
 The `CaptureBackend` protocol (`capture/protocols.py`) is platform-independent, and
 nothing above `capture/factory.py` (application, media, storage, transcription,
-summarization) needs to change *in principle* to add a `capture/windows/backend.py`
-implementing it — `capture/factory.py` already documents exactly this.
+summarization) needed to change to add `capture/windows/backend.py` — confirmed, not just
+designed-for, as of Phase 8A: `capture/factory.py` now has a `win32` branch returning
+`WindowsCaptureBackend`, which (like `MacOSCaptureBackend`) is a thin wrapper around the
+one shared, platform-neutral `HelperClient` (relocated from `capture/macos/` to
+`capture/helper_client.py` in this phase, since it never had any macOS-specific code).
 
-That said, no Windows capture code exists yet (not even a stub), and getting there is
-more than three bullet points — see **PLAN.md's Phase 7 section** for the real gap
-analysis: the screen/audio capture technology choice is a genuine open fork (native
-helper vs. pure-Python capture, not an assumed Swift-helper-equivalent), the
-permission/consent model doesn't map 1:1 from macOS's TCC, ffmpeg isn't guaranteed
-present on a Windows machine the way it often is in a macOS dev setup, and no Windows
-development or test environment has been available to verify any of this. Cloud
-credential storage is the one piece that's genuinely close to free: `keyring` (already
-a core dependency) ships a Windows Credential Manager backend with the same API
-`MacOSKeychainStore` already uses.
+Phase 8A implemented the native helper (`native/windows/LocalMeetingRecorder.Capture/`,
+C#) using DXGI Desktop Duplication + WASAPI (via NAudio) + Media Foundation's Sink Writer —
+see `native/windows/README.md` for the full design and, critically, its "Status" section:
+**every file compiles and type-checks, nothing has run on real Windows hardware.** No
+Windows development or test machine has been available to this project at any point.
+`tests/capture/test_real_capture_windows.py` exists, gated by `LMR_HW_TESTS=1` +
+`sys.platform == "win32"`, exactly mirroring the macOS hardware test — waiting for someone
+with a real Windows 10 (19041+)/11 machine to run it.
+
+Still not built (unchanged from the prior gap analysis in **PLAN.md's Phase 7 section**,
+now partially superseded by Phase 8A): Windows packaging (NSIS/MSI), the
+`infrastructure/single_instance.py` named-mutex branch, and `WindowsCredentialManagerStore`
+— the last of which is genuinely close to free, since `keyring` (already a core dependency)
+ships a Windows Credential Manager backend with the same API `MacOSKeychainStore` already
+uses.
 
 ---
 

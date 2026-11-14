@@ -12,7 +12,7 @@ from pathlib import Path
 from local_meeting_recorder import APP_NAME
 from local_meeting_recorder.domain.errors import StorageDirectoryError
 
-HELPER_BINARY_NAME = "lmr-capture-helper"
+HELPER_BINARY_NAME = "lmr-capture-helper.exe" if sys.platform == "win32" else "lmr-capture-helper"
 HELPER_PATH_ENV = "LMR_HELPER_PATH"
 
 
@@ -119,7 +119,13 @@ def resolve_helper_binary(explicit: Path | None = None) -> Path | None:
     contents = bundle_contents_dir()
     if contents is not None:
         candidates.append(contents / "Helpers" / HELPER_BINARY_NAME)
-    candidates.append(project_root() / "native" / "macos" / "build" / HELPER_BINARY_NAME)
+    elif sys.platform == "win32" and is_frozen():
+        # No Windows packaging script exists yet (Phase 8A is capture-only) — this mirrors
+        # the macOS `Contents/Helpers/` convention for whenever one is built, and is inert
+        # until that directory actually exists.
+        candidates.append(Path(sys.executable).resolve().parent / "Helpers" / HELPER_BINARY_NAME)
+    dev_native_dir = "windows" if sys.platform == "win32" else "macos"
+    candidates.append(project_root() / "native" / dev_native_dir / "build" / HELPER_BINARY_NAME)
     on_path = shutil.which(HELPER_BINARY_NAME)
     if on_path:
         candidates.append(Path(on_path))

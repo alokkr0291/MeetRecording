@@ -6,7 +6,8 @@
 |---|---|---|---|
 | Unit | `tests/unit/` | yes | no |
 | Integration | `tests/integration/` | yes | FFmpeg on PATH for media tests |
-| Capture (hardware) | `tests/capture/` | no, gated by `LMR_HW_TESTS=1` | yes: Screen Recording + Microphone grants, an output device the mic can hear |
+| Capture (hardware, macOS) | `tests/capture/test_real_capture.py` | no, gated by `LMR_HW_TESTS=1` + `sys.platform == "darwin"` | yes: Screen Recording + Microphone grants, an output device the mic can hear |
+| Capture (hardware, Windows) | `tests/capture/test_real_capture_windows.py` | no, gated by `LMR_HW_TESTS=1` + `sys.platform == "win32"` | yes: a built `lmr-capture-helper.exe` (`scripts/build_helper_windows.ps1`), an output device the mic can hear. **Never run** — no Windows machine has been available to this project; see `native/windows/README.md`. |
 | Transcription (real model) | `tests/transcription/` | no, gated by `LMR_WHISPER_TESTS=1` | downloads a faster-whisper model on first run |
 | Diarization (real model) | `tests/speaker/` | no, gated by `LMR_DIARIZATION_TESTS=1` | a Hugging Face token that accepted pyannote's terms; downloads the model on first run |
 | Summarization (real providers) | `tests/summarization/` | no, gated per provider (`LMR_OLLAMA_TESTS=1` / `LMR_OPENAI_SUMMARY_TESTS=1` / `LMR_OPENROUTER_SUMMARY_TESTS=1`) | a local Ollama server with a pulled model, or a real OpenAI/OpenRouter API key (spends credit) |
@@ -20,7 +21,7 @@ The suite never fakes a passing result: hardware tests `skip` (not pass) when th
 source .venv/bin/activate
 bash scripts/test.sh            # ruff format --check, ruff check, mypy, pytest (unit + integration)
 pytest tests/unit -q            # unit only
-LMR_HW_TESTS=1 pytest tests/capture -q -s   # real capture on this Mac
+LMR_HW_TESTS=1 pytest tests/capture -q -s   # real capture on this machine (macOS or Windows, whichever you're on)
 LMR_WHISPER_TESTS=1 pytest tests/transcription -q -s   # real faster-whisper model (downloads on first run)
 LMR_DIARIZATION_TESTS=1 pytest tests/speaker -q -s   # real pyannote model (downloads on first run, needs a HF token)
 LMR_OLLAMA_TESTS=1 pytest tests/summarization -q -s   # real local Ollama server (needs LMR_OLLAMA_TEST_MODEL set)
@@ -47,6 +48,18 @@ Interpretation:
 - System track fails but mic track passes: ScreenCaptureKit audio not delivered (permission or OS issue). Check Screen Recording grant.
 - Mic track fails but system track passes: Microphone permission, wrong input device, or speaker and mic are not acoustically coupled (headphones). Re-run with a speaker.
 - Both fail: helper did not receive audio; read the helper log in the session directory.
+
+### Windows hardware acceptance test (Phase 8A)
+
+File: `tests/capture/test_real_capture_windows.py` — same procedure and interpretation as
+above, adapted for Windows: `WindowsCaptureBackend`/`lmr-capture-helper.exe`, a `.mp4`
+output instead of `.mov`, PowerShell's `System.Media.SoundPlayer` instead of `afplay`
+(Windows has no equivalent bundled CLI player), and `tasklist` instead of `pgrep` to
+confirm the helper process exited. **Has never been run** — build the helper first with
+`scripts/build_helper_windows.ps1` on a real Windows 10 (19041+)/11 machine, then
+`LMR_HW_TESTS=1 pytest tests/capture/test_real_capture_windows.py -q -s`. Until someone
+does this, Windows capture is "compiles correctly," never "works" — see
+`native/windows/README.md`.
 
 ## Failure-mode matrix (how each is tested)
 
@@ -119,3 +132,5 @@ Append one entry per run.
 | 2026-11-11 | `python scripts/benchmark_cpu.py --synthesize-speech-minutes 1 --whisper-model tiny` (and `base`) | REAL RESULT | Apple M2 Max, 12 logical CPUs, 32 GB RAM, macOS 26.2 arm64. 71.6s of synthesized speech: "tiny" transcribed in 9.9s wall-clock (43.9 CPU-s, 478.6 MB peak RSS); "base" in 13.8s wall-clock (62.8 CPU-s, 697.5 MB peak RSS). Both `device="cpu"`, `compute_type="int8"` |
 | 2026-11-11 | `python scripts/benchmark_cpu.py --synthesize-speech-minutes 5 --whisper-model tiny` | REAL RESULT | Same hardware. 352.4s (~5.9 min) of synthesized speech transcribed in 45.0s wall-clock (214.5 CPU-s, 739.9 MB peak RSS), "tiny" model, CPU/int8 |
 | 2026-11-11 | 30-minute and 60-minute transcription benchmarks; diarization and summarization benchmark stages | NOT RUN | No real 30/60-minute recording was available, and running `scripts/benchmark_cpu.py --diarize`/`--summarize-transcript` needs a Hugging Face token / a local Ollama server, neither available in this environment. Do not report these as measured — see `scripts/benchmark_cpu.py`'s `"not_run"` list for exactly what a given invocation skipped and why. |
+| 2026-11-12 | `bash scripts/test.sh` (Phase 8A: Windows native capture backend) | PASS | 465 tests (463 + 2 new: `win32` factory test, `resolve_helper_binary` dev-build-dir platform test); `ruff format --check`/`ruff check`/`mypy` all clean. `dotnet build`/`dotnet publish --runtime win-x64` for `native/windows/LocalMeetingRecorder.Capture/` succeeded with 0 warnings/errors, verified by actually compiling (not just reading the code), including resolving real Vortice.DXGI/Direct3D11/MediaFoundation and NAudio method signatures via assembly reflection rather than guessing. |
+| 2026-11-12 | `LMR_HW_TESTS=1 pytest tests/capture/test_real_capture_windows.py -s -q` | NOT RUN — NO WINDOWS MACHINE AVAILABLE | This is the only test that could prove Windows capture actually works; it has never executed. Do not treat Phase 8A's compile success as evidence of working capture — see `native/windows/README.md`'s "Status" section. |

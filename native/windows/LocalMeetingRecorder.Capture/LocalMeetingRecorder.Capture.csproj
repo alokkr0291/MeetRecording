@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Targets Windows 10 build 19041 (version 2004)+, not the 1903 floor in the original
+    product spec: capturing a whole DISPLAY (not just a window) via Windows.Graphics.Capture
+    needs 19041+, and this project uses DXGI Desktop Duplication instead of Graphics.Capture
+    anyway (see README.md "Why DXGI Desktop Duplication, not Windows.Graphics.Capture") —
+    kept at 19041+ regardless since it's also the realistic floor for Windows 10 support in
+    general at this point and avoids any ambiguity.
+
+    EnableWindowsTargeting lets this cross-compile (restore + `dotnet build`) from a non-
+    Windows machine, which is how most of this project's own development/verification was
+    actually done (see README.md) — the output can still only ever RUN on real Windows.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0-windows10.0.19041.0</TargetFramework>
+    <RootNamespace>LocalMeetingRecorder.Capture</RootNamespace>
+    <AssemblyName>lmr-capture-helper</AssemblyName>
+    <UseWindowsForms>true</UseWindowsForms>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <Platforms>x64</Platforms>
+    <!-- Only for the raw DXGI staging-texture row copy in Recorder.cs' WriteVideoSample. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Vortice.DXGI" Version="3.6.2" />
+    <PackageReference Include="Vortice.Direct3D11" Version="3.6.2" />
+    <PackageReference Include="Vortice.MediaFoundation" Version="3.6.2" />
+    <PackageReference Include="NAudio" Version="2.2.1" />
+  </ItemGroup>
+
+</Project>

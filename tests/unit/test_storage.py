@@ -56,6 +56,33 @@ def test_resolve_helper_prefers_explicit_then_env(
     assert resolve_helper_binary(not_exec) == env_bin  # non-executable candidates are skipped
 
 
+def test_resolve_helper_dev_build_dir_is_platform_specific(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 8A: a Windows dev build lives under native/windows/build, not native/macos/build —
+    selected by ``sys.platform`` at call time, never assumed from the host this test runs
+    on. Uses a fake project root so this never touches the real repo tree."""
+    win_dev_binary = tmp_path / "native" / "windows" / "build" / "lmr-capture-helper.exe"
+    macos_dev_binary = tmp_path / "native" / "macos" / "build" / "lmr-capture-helper"
+    for b in (win_dev_binary, macos_dev_binary):
+        b.parent.mkdir(parents=True)
+        b.write_text("")
+        b.chmod(b.stat().st_mode | stat.S_IXUSR)
+
+    monkeypatch.setattr(paths_module, "project_root", lambda: tmp_path)
+    monkeypatch.setattr(paths_module, "bundle_contents_dir", lambda: None)
+    monkeypatch.setattr(paths_module, "is_frozen", lambda: False)
+    monkeypatch.setattr(paths_module.shutil, "which", lambda name: None)
+
+    monkeypatch.setattr(paths_module.sys, "platform", "win32")
+    monkeypatch.setattr(paths_module, "HELPER_BINARY_NAME", "lmr-capture-helper.exe")
+    assert resolve_helper_binary() == win_dev_binary
+
+    monkeypatch.setattr(paths_module.sys, "platform", "darwin")
+    monkeypatch.setattr(paths_module, "HELPER_BINARY_NAME", "lmr-capture-helper")
+    assert resolve_helper_binary() == macos_dev_binary
+
+
 # -- resolve_external_binary (Phase 6C: a double-clicked .app's minimal PATH) -----------
 
 

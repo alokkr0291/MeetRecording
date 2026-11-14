@@ -1,10 +1,16 @@
 """Drives one ``lmr-capture-helper`` process over the JSON-lines protocol.
 
-Lifecycle note: the real helper exits on its own once a recording is stopped (see
-``native/macos/PROTOCOL.md``), so one ``HelperClient`` instance is good for exactly one
-logical operation: a permission/display query, or one start-recording-then-stop-recording
-cycle. ``MacOSCaptureBackend`` creates a fresh client per operation; this class does not
-try to be reusable across a process exit.
+Platform-neutral: this class only knows how to speak the JSON-lines wire protocol to
+*some* executable via ``infrastructure.subprocess_manager.ManagedProcess`` — it has no
+macOS- or Windows-specific logic at all. Both ``capture.macos.backend.MacOSCaptureBackend``
+and ``capture.windows.backend.WindowsCaptureBackend`` share this one implementation rather
+than each carrying their own copy, since the protocol (``native/macos/PROTOCOL.md``) is
+deliberately the same wire format on every platform.
+
+Lifecycle note: the real helper exits on its own once a recording is stopped, so one
+``HelperClient`` instance is good for exactly one logical operation: a permission/display
+query, or one start-recording-then-stop-recording cycle. Each backend creates a fresh
+client per operation; this class does not try to be reusable across a process exit.
 
 Concurrency model: the protocol is request/response and the helper processes commands in
 order, so only one command is ever "in flight" from this client at a time. A single

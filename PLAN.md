@@ -23,7 +23,9 @@
 ### Non-Requirements (deferred)
 - iOS / iPadOS recording
 - Remote/cloud transcription (optional future feature)
-- Windows (Phase 7 — architecture supports it)
+- Windows packaging/installer, Windows credential storage, Windows single-instance guard
+  (capture itself is implemented as of Phase 8A — see that section — but unverified on
+  real hardware, and these surrounding pieces are still not built)
 
 ### Acceptance Criteria — Milestone 1 (Phases 0–3)
 
@@ -372,6 +374,35 @@ instruction to only inventory Windows blockers.
 7. A hardware-gated test suite mirroring `tests/capture/` (`LMR_HW_TESTS=1`), run by a
    human with real Windows hardware — this project's own standard for "don't claim
    capture works because it compiles" applies identically here.
+
+### Phase 8A — Windows Native Capture Backend [implemented, unverified on real hardware]
+
+Items 1–3 and 7 of the phased order above are now done: the architecture fork was decided
+(native helper, mirroring macOS — see `native/windows/README.md` for why DXGI Desktop
+Duplication was used instead of this phase's originally-suggested Windows.Graphics.Capture),
+`native/windows/LocalMeetingRecorder.Capture/` (C#) and `capture/windows/backend.py`
+(Python) were built against the existing protocol with zero changes needed above
+`capture/factory.py`, and `tests/capture/test_real_capture_windows.py` exists, gated by
+`LMR_HW_TESTS=1` + `sys.platform == "win32"`, mirroring the macOS hardware test exactly.
+
+**What "implemented" means here, precisely**: every file compiles and type-checks via
+`dotnet build`/`dotnet publish --runtime win-x64` (verified repeatedly during development,
+including resolving real method signatures via assembly reflection rather than guessing),
+and the Python-side unit test suite passes. **Nothing has executed on a real Windows
+machine** — no Windows hardware was available during development. See
+`native/windows/README.md`'s "Status" and "Known gaps" sections for the complete, honest
+list of what still needs real-hardware verification before this is trusted for an actual
+meeting (WASAPI mix-format/resample assumptions, multi-monitor DPI correlation, Desktop
+Duplication's known re-acquisition edge cases, AAC encoder format support).
+
+Still not done (unchanged from the inventory above, out of this phase's explicit scope):
+`infrastructure/single_instance.py`'s named-mutex branch, `WindowsCredentialManagerStore`,
+ffmpeg availability story, and Windows packaging (NSIS/MSI). Two small, necessary changes
+to previously-macOS-only shared code were required and are now done: `storage/paths.py`'s
+`resolve_helper_binary()` has a Windows binary-name/dev-build-dir branch, and
+`infrastructure/subprocess_manager.py`'s force-kill path no longer uses POSIX-only
+`os.killpg`/`signal.SIGKILL` (would have raised `AttributeError` on Windows) — it now uses
+`Popen.terminate()`/`Popen.kill()`, which Python already abstracts correctly cross-platform.
 
 ---
 

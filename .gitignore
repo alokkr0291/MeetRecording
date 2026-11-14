@@ -21,6 +21,11 @@ htmlcov/
 native/macos/build/
 *.o
 *.dSYM/
+native/windows/build/
+native/windows/**/bin/
+native/windows/**/obj/
+*.exe
+*.pdb
 
 # Packaging artifacts
 packaging/macos/build/

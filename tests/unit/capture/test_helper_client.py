@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from local_meeting_recorder.capture.macos.helper_client import HelperClient
+from local_meeting_recorder.capture.helper_client import HelperClient
 from local_meeting_recorder.capture.protocols import CaptureCallbacks, StartOptions
 from local_meeting_recorder.domain.errors import (
     CaptureError,
