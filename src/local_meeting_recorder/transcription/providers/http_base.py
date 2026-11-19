@@ -21,6 +21,7 @@ fake HTTP transport — no real network calls, no real API keys, in the automate
 from __future__ import annotations
 
 import json
+import tempfile
 import urllib.error
 import urllib.request
 import wave
@@ -39,6 +40,19 @@ log = get_logger(__name__)
 
 UrlOpener = Callable[..., Any]  # matches urllib.request.urlopen's (request, timeout=...) shape
 
+# OpenAI's documented hard cap for /v1/audio/transcriptions is exactly 25 MiB
+# (26,214,400 bytes) measured against the whole request body — confirmed from a real
+# 413 error hit by a long meeting recording: "Maximum content size limit (26214400)
+# exceeded (26385366 bytes read)" (the ~170KB over the raw file size is multipart
+# boundary/header overhead, see http_encoding.py). For a 16kHz mono 16-bit WAV (this
+# app's extraction format, media/audio_extractor.py), that cap is hit at ~13.6 minutes
+# per source track — well within a normal meeting length, and every long-recording
+# transcription with a cloud provider failed outright before this fix. OpenRouter's own
+# limit for its OpenAI-compatible endpoint is not independently confirmed, so the same
+# conservative threshold applies to both clients sharing this base class: splitting a
+# file that didn't strictly need it is harmless, silently failing on one that did is not.
+_CHUNK_TARGET_BYTES = 20 * 1024 * 1024  # ~20% margin below the 25 MiB hard cap
+
 
 def _local_wav_duration_s(audio_path: Path) -> float:
     """Best-effort duration of the local (always-WAV) file, used as a fallback when the
@@ -49,6 +63,47 @@ def _local_wav_duration_s(audio_path: Path) -> float:
             return wav_file.getnframes() / rate if rate else 0.0
     except (OSError, wave.Error):
         return 0.0
+
+
+def _wav_chunk_windows(audio_path: Path, *, max_bytes: int) -> list[tuple[float, float]]:
+    """``(start_s, end_s)`` windows covering the whole file, each window's raw PCM
+    payload at or under ``max_bytes``. Returns ``[]`` if the file cannot be read as a
+    WAV — the caller falls back to a single upload, whose own HTTP error (if any)
+    surfaces normally rather than this function inventing a diagnosis."""
+    try:
+        with wave.open(str(audio_path), "rb") as wav_file:
+            rate = wav_file.getframerate()
+            channels = wav_file.getnchannels()
+            sampwidth = wav_file.getsampwidth()
+            total_frames = wav_file.getnframes()
+    except (OSError, wave.Error):
+        return []
+    if rate <= 0 or total_frames <= 0 or channels <= 0 or sampwidth <= 0:
+        return []
+    frames_per_chunk = max(1, min(total_frames, max_bytes // (channels * sampwidth)))
+    windows: list[tuple[float, float]] = []
+    start_frame = 0
+    while start_frame < total_frames:
+        end_frame = min(start_frame + frames_per_chunk, total_frames)
+        windows.append((start_frame / rate, end_frame / rate))
+        start_frame = end_frame
+    return windows
+
+
+def _write_wav_window(src_path: Path, dest_path: Path, *, start_s: float, end_s: float) -> None:
+    """Copies one time window of ``src_path`` into a new, standalone WAV file — no
+    re-encoding, since the source is already PCM and all this needs to do is split it."""
+    with wave.open(str(src_path), "rb") as src:
+        rate = src.getframerate()
+        channels = src.getnchannels()
+        sampwidth = src.getsampwidth()
+        src.setpos(int(start_s * rate))
+        frames = src.readframes(int(end_s * rate) - int(start_s * rate))
+    with wave.open(str(dest_path), "wb") as dest:
+        dest.setnchannels(channels)
+        dest.setsampwidth(sampwidth)
+        dest.setframerate(rate)
+        dest.writeframes(frames)
 
 
 class HttpTranscriptionClientBase:
@@ -71,7 +126,11 @@ class HttpTranscriptionClientBase:
         model: str | None = None,
         timeout: float = 120.0,
         opener: UrlOpener = urllib.request.urlopen,
+        chunk_target_bytes: int = _CHUNK_TARGET_BYTES,
     ) -> None:
+        # Instance (not class) attribute so tests can exercise chunking without a real
+        # multi-megabyte fixture, by passing a tiny value here.
+        self.chunk_target_bytes = chunk_target_bytes
         self.model_name = model or self.default_model
         self._api_key = api_key
         self._timeout = timeout
@@ -89,6 +148,63 @@ class HttpTranscriptionClientBase:
         language: str | None = None,
         on_segment: OnSegment | None = None,
     ) -> EngineResult:
+        """A file under ``chunk_target_bytes`` is sent as one request (unchanged
+        behavior). A larger one — any meeting recording past ~13.6 minutes as a 16kHz
+        mono WAV — would otherwise be rejected outright by the provider's upload size
+        cap (see ``_CHUNK_TARGET_BYTES``'s comment), so it is split into several
+        requests instead, each independently sent and merged back into one result with
+        segment timestamps shifted to the original file's timeline."""
+        if audio_path.stat().st_size <= self.chunk_target_bytes:
+            result = self._request_transcription(audio_path, language=language)
+            if on_segment is not None:
+                for seg in result.segments:
+                    on_segment(seg.end_s, result.duration_s)
+            return result
+        return self._transcribe_in_chunks(audio_path, language=language, on_segment=on_segment)
+
+    def _transcribe_in_chunks(
+        self, audio_path: Path, *, language: str | None, on_segment: OnSegment | None
+    ) -> EngineResult:
+        windows = _wav_chunk_windows(audio_path, max_bytes=self.chunk_target_bytes)
+        if not windows:
+            # Not a readable WAV (or empty) — let a single request's own error surface
+            # normally rather than guessing why it can't be split.
+            result = self._request_transcription(audio_path, language=language)
+            if on_segment is not None:
+                for seg in result.segments:
+                    on_segment(seg.end_s, result.duration_s)
+            return result
+
+        total_duration_s = windows[-1][1]
+        log.info(
+            "splitting long recording for cloud upload",
+            extra={"chunks": len(windows), "total_duration_s": total_duration_s},
+        )
+        all_segments: list[TranscriptSegment] = []
+        language_result = language
+        with tempfile.TemporaryDirectory(prefix="lmr-chunk-") as tmpdir_str:
+            tmpdir = Path(tmpdir_str)
+            for index, (start_s, end_s) in enumerate(windows):
+                chunk_path = tmpdir / f"chunk_{index}.wav"
+                _write_wav_window(audio_path, chunk_path, start_s=start_s, end_s=end_s)
+                chunk_result = self._request_transcription(chunk_path, language=language)
+                if language_result is None and chunk_result.language != "unknown":
+                    language_result = chunk_result.language
+                for seg in chunk_result.segments:
+                    shifted = seg.model_copy(
+                        update={"start_s": seg.start_s + start_s, "end_s": seg.end_s + start_s}
+                    )
+                    all_segments.append(shifted)
+                    if on_segment is not None:
+                        on_segment(shifted.end_s, total_duration_s)
+        return EngineResult(
+            language=language_result or "unknown",
+            language_probability=None,
+            duration_s=total_duration_s,
+            segments=all_segments,
+        )
+
+    def _request_transcription(self, audio_path: Path, *, language: str | None) -> EngineResult:
         response_format = self._response_format()
         fields = {
             "model": self.model_name,
@@ -108,13 +224,9 @@ class HttpTranscriptionClientBase:
             },
         )
         payload = self._send(request)
-        result = self._parse_transcription_response(
+        return self._parse_transcription_response(
             payload, language=language, fallback_duration_s=_local_wav_duration_s(audio_path)
         )
-        if on_segment is not None:
-            for seg in result.segments:
-                on_segment(seg.end_s, result.duration_s)
-        return result
 
     @staticmethod
     def _parse_transcription_response(

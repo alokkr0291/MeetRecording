@@ -254,6 +254,19 @@ All notable changes to LocalMeetingRecorder. Format follows Keep a Changelog; ve
   "recommended: base, tiny available for lower-end hardware" requirement.
 
 ### Fixed
+- Cloud transcription (OpenAI/OpenRouter) failed outright on every meeting recording past
+  ~13.6 minutes: `HttpTranscriptionClientBase.transcribe()` uploaded the whole extracted
+  16kHz mono WAV in one request with no size check, and OpenAI's `/v1/audio/transcriptions`
+  hard-rejects any upload over 25 MiB (confirmed from a real user's logs — HTTP 413,
+  "Maximum content size limit (26214400) exceeded" — for both the system and microphone
+  tracks of a long recording). Fixed: a file over a conservative 20MB threshold is now
+  split into several sub-threshold WAV chunks (`http_base.py`'s `_wav_chunk_windows`/
+  `_write_wav_window`, stdlib `wave` only, no re-encoding), each transcribed independently
+  and merged back into one result with segment timestamps shifted onto the original
+  file's timeline — a recording under the threshold is sent exactly as before, unchanged.
+  5 new tests covering the byte-budget math, the frame-accurate WAV slicing, and the
+  merged/shifted end-to-end result.
+
 - Corrected several mismatches between the originally sketched helper protocol in
   `ARCHITECTURE.md` and the real `native/macos/Sources/main.swift`: the microphone field
   is `capture_microphone`, not `capture_mic`; the protocol never carries a `session_id`;
