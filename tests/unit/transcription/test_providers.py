@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import json
+import struct
 import urllib.error
 import urllib.request
 import wave
@@ -31,6 +32,10 @@ from local_meeting_recorder.transcription.providers.factory import (
     OPENROUTER_API_KEY_CREDENTIAL,
     build_provider_client,
     provider_availability,
+)
+from local_meeting_recorder.transcription.providers.http_base import (
+    _wav_chunk_windows,
+    _write_wav_window,
 )
 from local_meeting_recorder.transcription.providers.openai_client import OpenAITranscriptionClient
 from local_meeting_recorder.transcription.providers.openrouter_client import (
@@ -101,6 +106,19 @@ def _real_wav(tmp_path: Path, *, frames: int = 1600, rate: int = 16_000) -> Path
         wav_file.setframerate(rate)
         wav_file.writeframes(b"\x00\x00" * frames)
     return path
+
+
+@dataclass
+class _SequencedOpener:
+    """Like ``_FakeOpener`` but returns one response per call, in order — needed for
+    chunked-upload tests where each chunk gets its own distinct fake response."""
+
+    responses: list[_FakeResponse]
+    requests: list[urllib.request.Request] = field(default_factory=list)
+
+    def __call__(self, request: urllib.request.Request, *, timeout: float) -> _FakeResponse:
+        self.requests.append(request)
+        return self.responses[len(self.requests) - 1]
 
 
 # -- OpenAI -----------------------------------------------------------------------------
@@ -199,6 +217,86 @@ def test_openai_whisper1_still_requests_verbose_json(tmp_path: Path) -> None:
 
     client.transcribe(audio_path)
     assert b"verbose_json" in opener.requests[0].data
+
+
+# -- chunked upload for recordings over the provider's size limit (a real bug: every long
+# meeting with a cloud provider failed with HTTP 413, see http_base.py's _CHUNK_TARGET_BYTES
+# comment) -------------------------------------------------------------------------------
+
+
+def test_wav_chunk_windows_splits_by_byte_budget(tmp_path: Path) -> None:
+    path = _real_wav(tmp_path, frames=40_000, rate=16_000)  # 2.5s of mono 16-bit silence
+    windows = _wav_chunk_windows(path, max_bytes=32_000)  # 32000 B = 1.0s at this format
+    assert windows == pytest.approx([(0.0, 1.0), (1.0, 2.0), (2.0, 2.5)])
+
+
+def test_wav_chunk_windows_returns_empty_for_unreadable_file(tmp_path: Path) -> None:
+    path = _audio_stub(tmp_path)  # not a real WAV
+    assert _wav_chunk_windows(path, max_bytes=32_000) == []
+
+
+def test_write_wav_window_slices_the_correct_frame_range(tmp_path: Path) -> None:
+    src = tmp_path / "src.wav"
+    with wave.open(str(src), "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(16_000)
+        # a distinct sample value per frame so the slice can be checked exactly
+        wav_file.writeframes(b"".join(struct.pack("<h", i) for i in range(100)))
+
+    dest = tmp_path / "dest.wav"
+    _write_wav_window(src, dest, start_s=16 / 16_000, end_s=32 / 16_000)  # frames 16..32
+
+    with wave.open(str(dest), "rb") as wav_file:
+        assert wav_file.getnframes() == 16
+        assert wav_file.getframerate() == 16_000
+        samples = struct.unpack(f"<{16}h", wav_file.readframes(16))
+        assert samples == tuple(range(16, 32))
+
+
+def _chunk_body(*, text: str, duration: float = 1.0) -> bytes:
+    payload = {
+        "language": "en",
+        "duration": duration,
+        "segments": [{"start": 0.0, "end": 0.5, "text": text}],
+    }
+    return json.dumps(payload).encode("utf-8")
+
+
+def test_openai_transcribe_splits_a_long_recording_into_chunks(tmp_path: Path) -> None:
+    # 3.0s at 16kHz mono 16-bit = 96,000 bytes; a 32,000-byte budget forces 3 chunks.
+    audio_path = _real_wav(tmp_path, frames=48_000, rate=16_000)
+    opener = _SequencedOpener(
+        responses=[
+            _FakeResponse(status=200, body=_chunk_body(text="a")),
+            _FakeResponse(status=200, body=_chunk_body(text="b")),
+            _FakeResponse(status=200, body=_chunk_body(text="c")),
+        ]
+    )
+    client = OpenAITranscriptionClient(api_key="sk-test", opener=opener, chunk_target_bytes=32_000)
+
+    seen: list[tuple[float, float | None]] = []
+    result = client.transcribe(audio_path, on_segment=lambda p, t: seen.append((p, t)))
+
+    assert len(opener.requests) == 3
+    assert [(s.start_s, s.end_s, s.text) for s in result.segments] == [
+        (0.0, 0.5, "a"),
+        (1.0, 1.5, "b"),
+        (2.0, 2.5, "c"),
+    ]
+    assert result.duration_s == pytest.approx(3.0)
+    assert result.language == "en"
+    # on_segment sees shifted times against the WHOLE file's duration, not each chunk's.
+    assert seen == [pytest.approx((0.5, 3.0)), pytest.approx((1.5, 3.0)), pytest.approx((2.5, 3.0))]
+
+
+def test_small_recording_is_not_chunked(tmp_path: Path) -> None:
+    audio_path = _real_wav(tmp_path, frames=1600, rate=16_000)  # well under any budget
+    opener = _FakeOpener(response=_FakeResponse(status=200, body=_verbose_json_body()))
+    client = OpenAITranscriptionClient(api_key="sk-test", opener=opener)
+
+    client.transcribe(audio_path)
+    assert len(opener.requests) == 1
 
 
 def test_openai_test_connection_ok() -> None:
