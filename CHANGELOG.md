@@ -5,6 +5,13 @@ All notable changes to LocalMeetingRecorder. Format follows Keep a Changelog; ve
 ## [Unreleased]
 
 ### Added
+- Windows packaging (Phase 8C): `packaging/windows/LocalMeetingRecorder.spec` +
+  `scripts/build_windows.ps1` build a relocatable
+  `packaging/windows/dist/LocalMeetingRecorder/` folder — PyInstaller onedir app with
+  the capture helper published self-contained into `Helpers\` (no .NET runtime needed
+  on target machines), same diarization/dev-tool excludes as the macOS spec.
+  `scripts/make_app_icon.py` can now also emit a multi-size `.ico` (stdlib-written,
+  PNG-compressed entries), selected by output suffix. No installer or code signing yet.
 - Project scaffold, governance documents, and `.claude/` context (Phase 0).
 - Python foundation: settings, structured logging, bounded subprocess manager, domain
   layer (session id, recording state machine, session metadata), session storage (Phase 1).
@@ -254,6 +261,24 @@ All notable changes to LocalMeetingRecorder. Format follows Keep a Changelog; ve
   "recommended: base, tiny available for lower-end hardware" requirement.
 
 ### Fixed
+- `native/windows/.../Recorder.cs`: the system-audio track now stays continuous from
+  session start — WASAPI loopback delivers no packets while nothing is rendering
+  (confirmed on real hardware 2026-11-16: the track started at the first played sound,
+  3.17s in, failing the hardware test's <250ms A/V-sync assertion), so a pump timer now
+  fills loopback starvation gaps with zeroed PCM, staying ~150ms behind the session
+  clock, and real buffers stamp monotonically past any filled silence.
+- `capture/protocols.py`: `ReadyInfo`/`ProbeInfo` required a `macos` field, but the
+  Windows helper reports its OS version as `windows` — every `ready`/`probe` event from
+  the Windows helper failed validation, `check_permissions()` timed out, and no Windows
+  capture could ever start. Both fields are now optional and informational. Found in the
+  first-ever run of `native/windows/` on real Windows hardware (session 15, 2026-11-16);
+  invisible to all fake-helper tests because the fakes emit macOS-shaped events.
+- Four pre-existing POSIX-only assumptions in the test suite, found by running it on
+  Windows for the first time (session 15): `test_pyannote_engine.py`'s module-level
+  `find_spec("pyannote.audio")` aborted collection of the entire suite when `pyannote`
+  was absent; `test_logging_setup.py` asserted a POSIX path separator;
+  `test_storage.py`'s executable-bit and chmod-unwritable-directory scenarios don't
+  exist on Windows and are now gated/skipped there with explicit reasons.
 - Corrected several mismatches between the originally sketched helper protocol in
   `ARCHITECTURE.md` and the real `native/macos/Sources/main.swift`: the microphone field
   is `capture_microphone`, not `capture_mic`; the protocol never carries a `session_id`;

@@ -15,8 +15,20 @@ import pytest
 from local_meeting_recorder.domain.errors import DiarizationError, DiarizationUnavailableError
 from local_meeting_recorder.speaker.pyannote_engine import PyannoteSpeakerDiarizationEngine
 
+
+def _pyannote_audio_installed() -> bool:
+    # find_spec("pyannote.audio") raises ModuleNotFoundError (rather than returning
+    # None) when the parent "pyannote" package is absent entirely — which aborted the
+    # whole suite's collection on any machine without the diarization extra. Found by
+    # running the suite on a fresh Windows checkout (2026-11-16).
+    try:
+        return importlib.util.find_spec("pyannote.audio") is not None
+    except ModuleNotFoundError:
+        return False
+
+
 pytestmark = pytest.mark.skipif(
-    importlib.util.find_spec("pyannote.audio") is None,
+    not _pyannote_audio_installed(),
     reason="pyannote.audio not installed — install the 'diarization' extra to run this",
 )
 

@@ -45,6 +45,40 @@ def test_parse_ready_event() -> None:
     assert model.pid == 123
 
 
+def test_parse_ready_and_probe_events_from_the_windows_helper() -> None:
+    """The Windows helper reports its OS version as ``windows``, not ``macos``.
+
+    Found by actually running the helper on real Windows hardware (2026-11-16): the
+    required ``macos`` field made every Windows ``ready``/``probe`` event unparseable,
+    so ``check_permissions()`` timed out before any capture could start.
+    """
+    name, ready = parse_event(
+        {
+            "event": "ready",
+            "version": "0.1.0",
+            "protocol": 1,
+            "pid": 123,
+            "windows": "Microsoft Windows NT 10.0.26200.0",
+        }
+    )
+    assert name == "ready"
+    assert isinstance(ready, ReadyInfo)
+    assert ready.macos is None
+
+    name, probe = parse_event(
+        {
+            "event": "probe",
+            "version": "0.1.0",
+            "protocol": 1,
+            "windows": "Microsoft Windows NT 10.0.26200.0",
+            "permissions": {"screen": "granted", "screen_preflight": True, "microphone": "granted"},
+        }
+    )
+    assert name == "probe"
+    assert isinstance(probe, ProbeInfo)
+    assert probe.permissions.all_granted
+
+
 def test_parse_probe_event_with_nested_permissions() -> None:
     name, model = parse_event(
         {

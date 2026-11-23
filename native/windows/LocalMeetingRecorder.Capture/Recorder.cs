@@ -62,6 +62,26 @@ internal sealed class Recorder
     private readonly DateTime _startDate = DateTime.UtcNow;
     private readonly string _outputPath;
 
+    // -- system-audio silence fill --------------------------------------------------------
+    // WASAPI loopback delivers NO packets while nothing is rendering (confirmed on real
+    // hardware 2026-11-16: first system-audio sample arrived 3.17s into a recording whose
+    // first sound started 3.2s in, failing the hardware test's A/V-sync check). Without
+    // fill, the system track starts at the first sound and has holes across every silent
+    // stretch. A pump timer writes zeroed PCM to keep the track continuous from session
+    // start, staying SilenceLag100ns behind the clock so it never races ahead of a real
+    // buffer that is about to arrive. All system-track writes and position accounting are
+    // serialized by _systemAudioFillLock; _systemAudioNextPos100ns is the track's end
+    // position relative to _sessionStartTicks100ns and is only touched under that lock.
+    private const int SilencePumpIntervalMs = 100;
+    private const long SilenceLag100ns = 1_500_000; // fill up to 150 ms behind "now"
+    private const long SilenceMinGap100ns = 300_000; // ignore holes under 30 ms (arrival jitter)
+    private const long SilenceChunk100ns = 1_000_000; // write silence in <= 100 ms samples
+    private static readonly byte[] SilenceBytes = new byte[48000 / 10 * 2 * 2]; // 100 ms, 16-bit stereo
+    private readonly object _systemAudioFillLock = new();
+    private long _systemAudioNextPos100ns;
+    private long _systemAudioSilenceBuffers;
+    private System.Threading.Timer? _silencePumpTimer;
+
     // Counters — field names chosen to match ../../macos/PROTOCOL.md's `stats`/`stopped`
     // JSON keys once converted via Counters() below, not Swift's own private field names.
     private long _videoFrames;
@@ -131,6 +151,8 @@ internal sealed class Recorder
         _systemCapture?.StartRecording();
         _micCapture?.StartRecording();
         StartStatsTimer();
+        _silencePumpTimer = new System.Threading.Timer(
+            _ => PumpSystemSilence(), null, SilencePumpIntervalMs, SilencePumpIntervalMs);
 
         var tracks = new List<object?>
         {
@@ -413,10 +435,29 @@ internal sealed class Recorder
 
         using var sample = MediaFactory.MFCreateSample();
         sample.AddBuffer(buffer);
-        sample.SampleTime = ticks100ns - _sessionStartTicks100ns;
         var frames = pcm16.Length / (2 * 2); // 16-bit stereo
-        sample.SampleDuration = (long)(10_000_000.0 * frames / 48000);
-        _writer!.WriteSample(isMic ? _micAudioStreamIndex : _systemAudioStreamIndex, sample);
+        var duration100ns = (long)(10_000_000.0 * frames / 48000);
+        sample.SampleDuration = duration100ns;
+        if (isMic)
+        {
+            sample.SampleTime = ticks100ns - _sessionStartTicks100ns;
+            _writer!.WriteSample(_micAudioStreamIndex, sample);
+        }
+        else
+        {
+            lock (_systemAudioFillLock)
+            {
+                var relTime = ticks100ns - _sessionStartTicks100ns;
+                FillSystemSilenceUpTo(relTime);
+                // Stamp monotonically: if the pump already filled past this buffer's
+                // arrival time (bounded by SilenceLag100ns), continue from the track's
+                // end instead of overlapping the silence just written.
+                var stamp = Math.Max(relTime, _systemAudioNextPos100ns);
+                sample.SampleTime = stamp;
+                _writer!.WriteSample(_systemAudioStreamIndex, sample);
+                _systemAudioNextPos100ns = stamp + duration100ns;
+            }
+        }
 
         lock (_lock)
         {
@@ -431,6 +472,77 @@ internal sealed class Recorder
                 _firstSystemAudioTicks100ns ??= ticks100ns;
             }
             UpdateLastTicks(ticks100ns);
+        }
+    }
+
+    /// <summary>Timer callback: keeps the system-audio track filled with silence up to
+    /// (now - SilenceLag100ns) while WASAPI loopback is delivering nothing. Skips the tick
+    /// entirely (TryEnter) when a real buffer currently holds the fill lock.</summary>
+    private void PumpSystemSilence()
+    {
+        if (_stopping || _finished) return;
+        long sessionStart;
+        lock (_lock)
+        {
+            if (!_sessionStarted || _stopping || _finished) return;
+            sessionStart = _sessionStartTicks100ns;
+        }
+        if (!Monitor.TryEnter(_systemAudioFillLock)) return;
+        try
+        {
+            FillSystemSilenceUpTo(NowTicks100ns() - sessionStart - SilenceLag100ns);
+        }
+        catch (Exception e)
+        {
+            Log($"system-audio silence fill error: {e.Message}");
+        }
+        finally
+        {
+            Monitor.Exit(_systemAudioFillLock);
+        }
+    }
+
+    /// <summary>Writes zeroed 16-bit stereo PCM to the system-audio stream from its current
+    /// end position up to ``targetPos100ns`` (relative to session start), in chunks of at
+    /// most SilenceChunk100ns. Holes smaller than SilenceMinGap100ns are left alone — they
+    /// are ordinary arrival jitter, not loopback starvation. Caller must hold
+    /// _systemAudioFillLock.</summary>
+    private void FillSystemSilenceUpTo(long targetPos100ns)
+    {
+        while (!_stopping && targetPos100ns - _systemAudioNextPos100ns >= SilenceMinGap100ns)
+        {
+            var gap100ns = Math.Min(SilenceChunk100ns, targetPos100ns - _systemAudioNextPos100ns);
+            var frames = (int)(gap100ns * 48000 / 10_000_000);
+            if (frames <= 0) return;
+            var byteCount = Math.Min(frames * 2 * 2, SilenceBytes.Length);
+
+            var buffer = MediaFactory.MFCreateAlignedMemoryBuffer(byteCount, 16);
+            buffer.Lock(out var dest, out _, out _);
+            try
+            {
+                System.Runtime.InteropServices.Marshal.Copy(SilenceBytes, 0, dest, byteCount);
+            }
+            finally
+            {
+                buffer.CurrentLength = byteCount;
+                buffer.Unlock();
+            }
+
+            var pos100ns = _systemAudioNextPos100ns;
+            using var sample = MediaFactory.MFCreateSample();
+            sample.AddBuffer(buffer);
+            sample.SampleTime = pos100ns;
+            var written100ns = (long)(10_000_000.0 * (byteCount / 4) / 48000);
+            sample.SampleDuration = written100ns;
+            _writer!.WriteSample(_systemAudioStreamIndex, sample);
+            _systemAudioNextPos100ns = pos100ns + written100ns;
+
+            lock (_lock)
+            {
+                _systemAudioSilenceBuffers++;
+                _firstSystemAudioTicks100ns ??= _sessionStartTicks100ns + pos100ns;
+                UpdateLastTicks(_sessionStartTicks100ns + _systemAudioNextPos100ns);
+            }
         }
     }
 
@@ -514,6 +626,9 @@ internal sealed class Recorder
                 ["system_audio_buffers"] = _systemAudioBuffers,
                 ["system_audio_dropped_early"] = _systemAudioDroppedEarly,
                 ["system_audio_dropped_not_ready"] = 0,
+                // Windows-only diagnostic (ignored by the Python models, extra="ignore"):
+                // zeroed samples written while WASAPI loopback delivered nothing.
+                ["system_audio_silence_buffers"] = _systemAudioSilenceBuffers,
                 ["mic_audio_buffers"] = _micAudioBuffers,
                 ["mic_audio_dropped_early"] = _micAudioDroppedEarly,
                 ["mic_audio_dropped_not_ready"] = 0,
@@ -576,6 +691,13 @@ internal sealed class Recorder
             _stopping = true;
         }
         _statsTimer?.Dispose();
+        if (_silencePumpTimer is not null)
+        {
+            // Wait for any in-flight pump callback: a WriteSample racing Finalize() would
+            // be undefined behavior on the sink writer.
+            using var pumpDone = new ManualResetEvent(false);
+            if (_silencePumpTimer.Dispose(pumpDone)) pumpDone.WaitOne(2000);
+        }
         Out.Event("stopping", new Dictionary<string, object?> { ["reason"] = reason });
 
         var watchdog = new System.Threading.Timer(_ =>

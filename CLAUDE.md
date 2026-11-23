@@ -30,6 +30,10 @@ bash scripts/build_dev_app.sh    # builds packaging/macos/dev/LocalMeetingRecord
                                   # so Screen Recording/Microphone prompts are attributable;
                                   # `open packaging/macos/dev/LocalMeetingRecorder.app` to run it)
 LMR_HW_TESTS=1 pytest tests/capture -s -q   # real capture test (needs permissions)
+
+# Windows (PowerShell):
+#   scripts\build_helper_windows.ps1  — dev capture helper (framework-dependent)
+#   scripts\build_windows.ps1         — packaged build: packaging\windows\dist\LocalMeetingRecorder\
 LMR_WHISPER_TESTS=1 pytest tests/transcription -s -q   # real faster-whisper model (downloads on first run)
 ```
 

@@ -51,9 +51,12 @@ def test_resolve_helper_prefers_explicit_then_env(
     monkeypatch.setenv("LMR_HELPER_PATH", str(env_bin))
     assert resolve_helper_binary(explicit) == explicit
     assert resolve_helper_binary(None) == env_bin
-    not_exec = tmp_path / "noexec"
-    not_exec.write_text("x")
-    assert resolve_helper_binary(not_exec) == env_bin  # non-executable candidates are skipped
+    if sys.platform != "win32":
+        # Windows has no executable bit — os.access(..., X_OK) is true for any existing
+        # file there, so the "skip non-executable candidates" behavior is POSIX-only.
+        not_exec = tmp_path / "noexec"
+        not_exec.write_text("x")
+        assert resolve_helper_binary(not_exec) == env_bin  # non-executable candidates are skipped
 
 
 def test_resolve_helper_dev_build_dir_is_platform_specific(
@@ -168,6 +171,11 @@ def test_validate_writable_directory_rejects_a_file(tmp_path: Path) -> None:
         validate_writable_directory(target)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="chmod cannot make a directory unwritable on Windows (only the per-file "
+    "read-only flag exists), so this scenario is unconstructible here",
+)
 def test_validate_writable_directory_rejects_unwritable_dir(tmp_path: Path) -> None:
     target = tmp_path / "readonly"
     target.mkdir()

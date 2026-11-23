@@ -68,6 +68,16 @@ Source layout mirrors `main.swift`'s sections: `Protocol.cs` (JSON-lines I/O),
 
 ## Known gaps / things a human on real hardware must check
 
+0. ~~**WASAPI loopback delivers nothing during render silence.**~~ **Confirmed on real
+   hardware and fixed (2026-11-16).** The first real run of the hardware test showed the
+   system-audio track starting at the first played sound (3.17s in), not at recording
+   start — WASAPI loopback emits no packets while nothing is rendering. `Recorder.cs`
+   now keeps the system track continuous: a 100ms pump timer writes zeroed 16-bit PCM
+   from the track's current end position up to ~150ms behind the session clock whenever
+   loopback is starved (serialized with real buffers via `_systemAudioFillLock`;
+   real buffers fill any remaining hole and stamp monotonically past the filled
+   silence). The `stats` event gains a Windows-only `system_audio_silence_buffers`
+   diagnostic counter.
 1. **WASAPI mix-format assumption.** `Recorder.cs` configures the AAC encoder's input
    media type as fixed 48kHz 16-bit stereo and converts whatever NAudio actually delivers
    (commonly 32-bit float, at the audio engine's *actual* mix sample rate, which is not

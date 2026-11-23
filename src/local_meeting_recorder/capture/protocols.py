@@ -147,7 +147,10 @@ class ReadyInfo(BaseModel):
     version: str
     protocol: int
     pid: int
-    macos: str
+    # The helper reports its host OS version under a platform-named key: the macOS
+    # helper sends "macos", the Windows helper sends "windows". Informational only.
+    macos: str | None = None
+    windows: str | None = None
 
 
 class ProbeInfo(BaseModel):
@@ -155,7 +158,8 @@ class ProbeInfo(BaseModel):
 
     version: str
     protocol: int
-    macos: str
+    macos: str | None = None
+    windows: str | None = None
     permissions: PermissionStatus
 
 

@@ -2,7 +2,7 @@
 
 Source of truth for progress across sessions. Update at the end of every working session.
 
-Last updated: 2026-11-12 (session 14)
+Last updated: 2026-11-16 (session 15)
 
 Legend: `DONE` = implemented and verified as described; `PARTIAL` = implemented, verification incomplete; `TODO` = not started; `BLOCKED` = cannot proceed without external input.
 
@@ -657,12 +657,9 @@ needed above `capture/factory.py`.
 
 ### Known limitations (Phase 8A)
 
-- **Nothing in `native/windows/` has executed on real hardware.** This cannot be
-  overstated: every "done" above means "compiles and type-checks," never "captures a real
-  frame." No Windows machine was available during development. A human with real Windows
-  10 (19041+)/11 hardware must run `scripts/build_helper_windows.ps1` then
-  `LMR_HW_TESTS=1 pytest tests/capture/test_real_capture_windows.py -s -q` before this is
-  trusted for an actual meeting.
+- ~~Nothing in `native/windows/` has executed on real hardware.~~ **Superseded by the
+  session-15 first real-hardware run below (2026-11-16, Windows 11 Home 10.0.26200):
+  capture fundamentally works, with two findings still open — see Phase 8B.**
 - The WASAPI → AAC audio path assumes the capture device's mix format is close enough to
   48kHz 16-bit that a direct sample-format conversion (no resampling) is acceptable — see
   `native/windows/README.md`'s known-gaps list. Likely needs a real resampler if a given
@@ -673,6 +670,37 @@ needed above `capture/factory.py`.
   Duplication's well-known re-acquisition scenarios (display mode change, secure-desktop
   transition, output loss) are not specifically handled, since verifying the right
   behavior for each needs real hardware to trigger them.
+
+## Phase 8B — First Real-Hardware Windows Run (session 15, 2026-11-16)
+
+Environment: Windows 11 Home 10.0.26200 x64, Python 3.13.5, .NET SDK 9.0.321 (installed
+this session via winget), FFmpeg on PATH. Fresh `.venv`, `pip install -e ".[dev,transcription]"`.
+
+| Task | Status | Notes |
+|---|---|---|
+| `scripts/build_helper_windows.ps1` on real Windows | DONE | Built `native/windows/build/lmr-capture-helper.exe`; `--version` and a manual stdin `{"cmd":"probe"}` round-trip both worked — the helper's first-ever execution anywhere. (Manual-testing note: PowerShell's pipe adds a BOM the line parser rejects; use a BOM-free file redirect.) |
+| **Bug found and fixed**: Windows helper events unparseable by the Python client | DONE | `capture/protocols.py`'s `ReadyInfo`/`ProbeInfo` declared `macos: str` as **required**, but the Windows helper reports its OS under `windows` (per its own `Protocol.cs`) — so every `ready`/`probe` event failed validation and `check_permissions()` timed out after 10s; no capture could ever start. Fixed: both fields are now optional (`macos`/`windows`, informational only — nothing ever read `.macos`); regression test `test_parse_ready_and_probe_events_from_the_windows_helper` added with the real observed Windows payload. This was invisible to every fake-helper test because the fakes emit macOS-shaped events. |
+| App launched end to end (`python -m local_meeting_recorder.main`) | DONE | Tray app runs; data dirs created under `%LOCALAPPDATA%\LocalMeetingRecorder`. |
+| `LMR_HW_TESTS=1 pytest tests/capture/test_real_capture_windows.py -s -q` | **FAIL — but capture works** | After the protocols fix: recording started, stopped, finalized a valid `.mp4` with 1 video stream (frames > 0) + 2 independent audio streams; helper exited cleanly, no leaked process. **System audio (WASAPI loopback) captured the test tone at −8.2 dB RMS.** Two findings below. |
+| Finding 1 (real product gap): system-audio track starts at first sound, not recording start | DONE — fixed and verified on real hardware | `first_system_audio_offset_s=3.17` vs `video_offset_s=0.0` → the test's <250 ms A/V-sync assertion failed. Cause: WASAPI loopback delivers **no packets while nothing is rendering** (classic, documented behavior), and `Recorder.cs` wrote no silence to bridge the gap — exactly the area the Phase 8A known-gaps list flagged. **Fixed in `Recorder.cs`** (same day): a 100 ms pump timer fills loopback starvation with zeroed 16-bit PCM from the track's end position up to ~150 ms behind the session clock; real buffers fill any remaining hole under the same lock and stamp monotonically past filled silence; the pump is drained (`Timer.Dispose(WaitHandle)`) before `Finalize()`. Re-ran the hardware test after rebuilding: `system_offset_s=0.0`, A/V-sync assertion **passed**, tone still captured (whole-track RMS −10.2 dB, consistent with ~3 s filled silence + the −8 dB tone). New Windows-only `system_audio_silence_buffers` diagnostic counter in `stats` (ignored by the Python models, `extra="ignore"`). |
+| Finding 2 (environment, not a defect): mic track silent (−83.7 dB RMS) | N/A | ffmpeg `dshow` recording directly from the same default mic ("Microphone Array (Intel Smart Sound)") measured −91 dB — this machine's microphone is silent at OS level (muted or privacy-blocked). The helper faithfully recorded what the OS delivered; mic packets did flow (offset 0.275s). Re-run after unmuting the mic to judge the mic path. |
+| First full test suite run on Windows | DONE | 448 passed, 25 skipped, ruff format/check clean — after fixing four pre-existing POSIX-only test assumptions: (1) `tests/unit/speaker/test_pyannote_engine.py`'s module-level `find_spec("pyannote.audio")` raises `ModuleNotFoundError` (aborting collection of the whole suite) when `pyannote` is absent entirely — now guarded; (2) `test_logging_setup` asserted a POSIX path separator — now compares against `str(Path(...))`; (3) `test_storage`'s non-executable-candidate assertion is POSIX-only (Windows has no executable bit) — now gated; (4) `test_storage`'s unwritable-directory test can't construct its scenario via `chmod` on Windows — now skipped there with the reason stated. No assertion was weakened on the platform it was written for. |
+| mypy on Windows | TODO (pre-existing) | Not clean: platform narrowing flags `fcntl` (`single_instance.py`) and POSIX-only branches (`subprocess_manager.py`), plus missing `torch`/`requests` stubs without the diarization extra. mypy had only ever been configured/run on macOS. Runtime is unaffected. Needs either per-platform `type: ignore[unused-ignore]`-safe guards or a CI matrix decision. |
+
+## Phase 8C — Windows Packaging (session 15, 2026-11-16)
+
+User confirmation first: after the Phase 8B silence-fill fix, the user manually tested
+recording on this machine and reported it working well (their words; not independently
+re-measured beyond the hardware-test run already logged).
+
+| Task | Status | Notes |
+|---|---|---|
+| `packaging/windows/LocalMeetingRecorder.spec` | DONE | Mirrors the macOS spec (same diarization/dev-tool exclude lists and rationale — see that file's comments), minus the BUNDLE step; `console=False`, `.ico` icon. |
+| `scripts/build_windows.ps1` | DONE | helper → icon → PyInstaller → copy helper into `Helpers\` next to the frozen exe (where `resolve_helper_binary()`'s existing win32-frozen branch, inert until now, looks). The helper is published **self-contained** for packaging (unlike the framework-dependent dev build) so target machines need no .NET runtime. |
+| `scripts/make_app_icon.py` `.ico` support | DONE | Writes a multi-size PNG-compressed `.ico` with the stdlib (Qt's own ICO writer only stores one image per file); dispatched by output suffix, macOS `.icns` path unchanged. |
+| Build executed and verified | DONE | `packaging/windows/dist/LocalMeetingRecorder/` (487.5 MB — self-contained .NET helper + PySide6 + faster-whisper/ctranslate2). Verified: no `torch`/`pyannote`/`mypy`/`pytest` directories leaked into `_internal/`; the bundled helper's `probe` round-trip works from `Helpers\`; the frozen `LocalMeetingRecorder.exe` launched and stayed running (tray app, ~97 MB working set). **A full record→transcribe cycle from the packaged exe has not been exercised yet** — only dev-mode recording has (user-tested + hardware test). |
+| Not bundled: ffmpeg/ffprobe | By design | Same policy as macOS — must be on PATH. |
+| Installer (NSIS/MSI), code signing, `tests/packaging/` for Windows | TODO | No signing identity exists; SmartScreen will warn on downloaded copies. Single-instance guard is still a no-op on win32 (named mutex remains Phase 7 TODO), so a second launch opens a second tray icon instead of refusing. `WindowsCredentialManagerStore` also still TODO — cloud API keys can't be saved on Windows yet (UI says so; local Whisper unaffected). |
 
 ## Known limitations and blockers
 

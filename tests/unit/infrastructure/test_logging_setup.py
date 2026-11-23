@@ -33,7 +33,9 @@ def test_json_formatter_includes_session_and_extras() -> None:
     assert payload["msg"] == "state recording"
     assert payload["session_id"] == "lmr_x"
     assert payload["frames"] == 12
-    assert payload["path"] == "/tmp/a"
+    # str(Path("/tmp/a")) is "\tmp\a" on Windows — the invariant under test is "a Path
+    # extra is serialized via str()", not a specific separator convention.
+    assert payload["path"] == str(Path("/tmp/a"))
     assert payload["level"] == "INFO"
     assert payload["logger"] == "local_meeting_recorder.test.fmt"
 
